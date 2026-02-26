@@ -20,7 +20,7 @@ export default function Contact() {
           <div className="rounded-3xl border border-rose-200 bg-white p-6 shadow-sm">
             <div className="text-xs font-semibold text-rose-600">COMPANY</div>
             <h2 className="mt-2 text-lg font-extrabold text-rose-950">
-              PECIFY INFRA PAYMENT SOLUTION PRIVATE LIMITED
+              THE HAIRPORT SALOON
             </h2>
 
             <div className="mt-5 space-y-4 text-sm text-rose-700">
@@ -29,9 +29,9 @@ export default function Contact() {
                   ADDRESS
                 </div>
                 <p className="mt-1 leading-6">
-                  4th Floor, 434, Shiven Square, <br />
-                  Pal Road, Opp Swsthik Party Plot, <br />
-                  Adajan, Surat, Gujarat - 395009
+                  70/29, arumbakkam, <br /> thirukural street,mmda colony,
+                  <br />
+                  ch-600106
                 </p>
               </div>
 
@@ -43,7 +43,7 @@ export default function Contact() {
                   href="tel:+917048179839"
                   className="mt-1 inline-flex items-center gap-2 font-semibold text-rose-950 hover:text-rose-800"
                 >
-                  +91 7048179839
+                  +91 9363625841
                 </a>
               </div>
             </div>
@@ -98,7 +98,7 @@ export default function Contact() {
               <button
                 type="button"
                 className="w-full rounded-2xl bg-rose-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-rose-900 focus:outline-none focus:ring-4 focus:ring-rose-200"
-                onClick={() => alert('Info submitted')}
+                onClick={() => alert("Info submitted")}
               >
                 Send Message
               </button>
