@@ -50,7 +50,7 @@ export default function Navbar() {
             className="flex items-center gap-2 rounded-xl px-2 py-1 font-bold tracking-tight text-rose-950 hover:bg-rose-100"
             aria-label="Go to homepage"
           >
-            <span className="text-lg">Hairport Collections</span>
+            <img src="/hairport_logo.png" alt="logo" className="h-18 w-24"/>
           </Link>
         </div>
 

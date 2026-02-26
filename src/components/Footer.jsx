@@ -15,9 +15,7 @@ export default function Footer() {
               className="inline-flex items-center gap-3 rounded-2xl px-2 py-1 font-extrabold tracking-tight text-rose-950 hover:bg-rose-50"
               aria-label="Go to homepage"
             >
-              <div className="leading-tight">
-                <div className="text-lg">Hairport Collections</div>                
-              </div>
+              <img src="/hairport_logo.png" alt="logo" className="h-18 w-28" />
             </Link>
 
             <p className="mt-4 max-w-sm text-sm leading-6 text-rose-700">
