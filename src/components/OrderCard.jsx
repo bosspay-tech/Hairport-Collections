@@ -11,13 +11,24 @@ function formatMoney(n) {
 
 function statusStyles(status = "") {
   const s = String(status).toLowerCase();
+
+  if (s.includes("success") || s.includes("paid"))
+    return "bg-emerald-50 text-emerald-700 border-emerald-200";
+
+  if (s.includes("failed") || s.includes("failure"))
+    return "bg-red-50 text-red-700 border-red-200";
+
   if (s.includes("delivered"))
     return "bg-emerald-50 text-emerald-700 border-emerald-200";
+
   if (s.includes("shipped") || s.includes("out"))
     return "bg-blue-50 text-blue-700 border-blue-200";
+
   if (s.includes("cancel")) return "bg-red-50 text-red-700 border-red-200";
+
   if (s.includes("pending") || s.includes("processing"))
     return "bg-amber-50 text-amber-700 border-amber-200";
+
   return "bg-slate-50 text-slate-700 border-slate-200";
 }
 
@@ -129,7 +140,7 @@ export default function OrderCard({ order }) {
             type="button"
             onClick={() => {
               navigator.clipboard?.writeText(String(order?.id || ""));
-              toast.success('Order Id copied to clipboard');
+              toast.success("Order Id copied to clipboard");
             }}
             className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 transition hover:bg-slate-50 focus:outline-none focus:ring-4 focus:ring-slate-100"
           >
