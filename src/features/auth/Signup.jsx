@@ -1,11 +1,14 @@
 import { useMemo, useState } from "react";
 import { signUp } from "./auth.service";
+import { useNavigate } from "react-router-dom";
+import toast from "react-hot-toast";
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
 }
 
 export default function Signup() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -76,7 +79,8 @@ export default function Signup() {
       if (error) {
         setFormError(error.message || "Signup failed. Please try again.");
       } else {
-        alert("Signup successful! You can now log in.");
+        toast.success("Signup successful! You can now log in.");
+        navigate('/')
       }
     } catch (err) {
       setFormError("Something went wrong. Please try again.");
@@ -214,7 +218,7 @@ export default function Signup() {
               <button
                 type="button"
                 className="font-semibold text-slate-900 hover:underline"
-                onClick={() => alert("Route to /login")}
+                onClick={() => navigate("/login")}
               >
                 Sign in
               </button>

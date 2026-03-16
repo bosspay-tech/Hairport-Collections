@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { signIn } from "./auth.service";
+import { useNavigate } from "react-router-dom";
 
 function isValidEmail(email) {
   // Simple + practical email check (not overly strict)
@@ -7,6 +8,7 @@ function isValidEmail(email) {
 }
 
 export default function Login() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
@@ -54,6 +56,7 @@ export default function Login() {
       const { error } = await signIn(email.trim(), password);
       if (error)
         setFormError(error.message || "Login failed. Please try again.");
+      navigate("/");
     } catch (err) {
       setFormError("Something went wrong. Please try again.");
     } finally {
@@ -173,7 +176,7 @@ export default function Login() {
               <button
                 type="button"
                 className="font-semibold text-slate-900 hover:underline"
-                onClick={() => alert("Route to /signup")}
+                onClick={() => navigate("/signup")}
               >
                 Create an account
               </button>

@@ -50,7 +50,7 @@ const defaultValues = {
   udf18: null,
   udf19: null,
   udf20: null,
-  env: "STAG",
+  env: import.meta.env.VITE_SABPAISA_ENV,
   callbackUrl: `${window.location.origin}/order-success`,
 };
 export default function Checkout() {
