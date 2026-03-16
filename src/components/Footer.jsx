@@ -21,6 +21,28 @@ export default function Footer() {
             <p className="mt-4 max-w-sm text-sm leading-6 text-rose-700">
               Premium products, simple checkout, and fast support.
             </p>
+            <p className="mt-4 max-w-sm text-sm leading-6 text-rose-700">
+              Premium products, simple checkout, and fast support.
+            </p>
+
+            {/* Business Details */}
+            <div className="mt-5 space-y-1 text-sm text-rose-700">
+              <div className="font-semibold text-rose-950">
+                THE HAIRPORT SALOON
+              </div>
+              <div>
+                70/29, Arumbakkam, <br />
+                Thirukural Street, MMDA Colony, <br />
+                Chennai - 600106
+              </div>
+              <div className="mt-2">📞 +91 93636 25841</div>
+              <div className="text-xs text-rose-600 mt-2">
+                GST: 33DJZPG1620K1Z0
+              </div>
+              <div className="text-xs text-rose-600">
+                UDYAM REG: UDYAM-TN-34-0100208
+              </div>
+            </div>
 
             {/* Trust badges */}
             <div className="mt-5 flex flex-wrap gap-2 text-xs text-rose-700">
