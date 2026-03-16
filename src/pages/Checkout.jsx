@@ -239,17 +239,6 @@ export default function Checkout() {
             </div>{" "}
           </div>{" "}
         </div>{" "}
-        {!user ? (
-          <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            {" "}
-            You’re placing this order as a{" "}
-            <span className="font-semibold">guest</span>.{" "}
-            <span className="ml-2 text-amber-700">
-              {" "}
-              (Optional) Login to track orders more easily.{" "}
-            </span>{" "}
-          </div>
-        ) : null}{" "}
         {error ? (
           <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {" "}
