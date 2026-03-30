@@ -51,6 +51,7 @@ export default function Navbar() {
             aria-label="Go to homepage"
           >
             <img src="/hairport_logo.png" alt="logo" className="h-18 w-24"/>
+            <p>The Hairport Saloon</p>
           </Link>
         </div>
 
