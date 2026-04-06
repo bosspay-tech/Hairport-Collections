@@ -20,7 +20,7 @@ export default function Contact() {
           <div className="rounded-3xl border border-rose-200 bg-white p-6 shadow-sm">
             <div className="text-xs font-semibold text-rose-600">COMPANY</div>
             <h2 className="mt-2 text-lg font-extrabold text-rose-950">
-              THE HAIRPORT SALOON
+              THE HAIRPORT SALON
             </h2>
 
             <div className="mt-5 space-y-4 text-sm text-rose-700">
