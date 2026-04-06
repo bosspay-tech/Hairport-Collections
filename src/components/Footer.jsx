@@ -28,7 +28,7 @@ export default function Footer() {
             {/* Business Details */}
             <div className="mt-5 space-y-1 text-sm text-rose-700">
               <div className="font-semibold text-rose-950">
-                THE HAIRPORT SALOON
+                THE HAIRPORT SALON
               </div>
               <div>
                 70/29, Arumbakkam, <br />
