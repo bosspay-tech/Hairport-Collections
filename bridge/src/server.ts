@@ -1,4 +1,7 @@
 import express from 'express';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import {
   createBossPayBridge,
   toExpress,
@@ -16,7 +19,7 @@ import {
 const PORT = Number(process.env.PORT ?? 3000);
 const BRIDGE_SECRET = process.env.BOSSPAY_BRIDGE_SECRET;
 const API_BASE = process.env.BOSSPAY_API_BASE ?? 'https://api.bosspay24.com';
-const BRIDGE_BASE_URL = process.env.BRIDGE_BASE_URL; // e.g. https://bridge.yourdomain.com
+const BRIDGE_BASE_URL = process.env.BRIDGE_BASE_URL; // e.g. https://www.hairportcollections.com
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -79,12 +82,18 @@ const bridge = createBossPayBridge({
 // ── Express app ────────────────────────────────────────────────────
 const app = express();
 
-// Health check (not the bridge /health — just for load balancers)
-app.get('/', (_req, res) => {
-  res.json({ ok: true, service: 'hairport-bosspay-bridge' });
-});
+// ── Static files: React frontend ───────────────────────────────────
+// In production the Dockerfile copies the Vite build output into /app/public
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const publicDir = join(__dirname, '..', 'public');
+const hasPublicDir = existsSync(publicDir);
 
-// BossPay bridge routes (HMAC-verified)
+if (hasPublicDir) {
+  app.use(express.static(publicDir));
+  console.log(`Serving frontend from ${publicDir}`);
+}
+
+// ── BossPay bridge routes (HMAC-verified) ──────────────────────────
 const bridgeHandler = toExpress({
   ctx: {
     handlers,
@@ -185,10 +194,8 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
       console.error('Failed to forward callback to BossPay:', fwdErr);
     }
 
-    // Redirect the customer to a user-facing result page.
-    // The frontend's /order-success page can read the encResponse from the query string.
-    const frontendOrigin = process.env.FRONTEND_URL ?? 'https://hairport-collections.com';
-    const redirectUrl = `${frontendOrigin}/order-success?encResponse=${encodeURIComponent(encResponse)}`;
+    // Redirect the customer to the frontend order-success page (same origin)
+    const redirectUrl = `/order-success?encResponse=${encodeURIComponent(encResponse)}`;
     res.redirect(302, redirectUrl);
   } catch (err) {
     console.error('Error handling SabPaisa callback:', err);
@@ -196,9 +203,18 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
   }
 });
 
+// ── SPA fallback: serve index.html for all other routes ────────────
+// This must come AFTER all API/bridge routes so they take priority
+if (hasPublicDir) {
+  app.get('{*path}', (_req, res) => {
+    res.sendFile(join(publicDir, 'index.html'));
+  });
+}
+
 // ── Start ──────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`hairport-bosspay-bridge listening on :${PORT}`);
   console.log(`Bridge base URL: ${BRIDGE_BASE_URL}`);
   console.log(`SabPaisa env: ${SABPAISA_ENV}`);
+  if (hasPublicDir) console.log('Frontend: serving React SPA');
 });
