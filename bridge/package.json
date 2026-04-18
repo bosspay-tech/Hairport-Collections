@@ -1,0 +1,24 @@
+{
+  "name": "hairport-bosspay-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "BossPay bridge for Hairport Collections — routes BossPay collect requests to SabPaisa",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@bosspay/bridge-node": "file:./vendor/bosspay-bridge-node-1.0.0.tgz",
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.6.0"
+  }
+}
