@@ -95,7 +95,8 @@ const bridgeHandler = toExpress({
   bridgeSecret: BRIDGE_SECRET!,
 });
 
-app.all('/wp-json/bosspay/v1/*', bridgeHandler);
+// Express 5 requires named wildcard params (not bare *)
+app.all('/wp-json/bosspay/v1/{*path}', bridgeHandler);
 
 // ── /pay/:pgTxnId — auto-submitting form that POSTs to SabPaisa ───
 app.get('/pay/:pgTxnId', (req, res) => {
