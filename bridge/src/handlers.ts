@@ -1,4 +1,5 @@
 import type { BridgeHandlers } from '@bosspay/bridge-node';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   buildSabPaisaEncData,
   type SabPaisaConfig,
@@ -11,24 +12,26 @@ export const pendingPayments = new Map<
   { encData: string; formActionUrl: string; clientCode: string }
 >();
 
-/**
- * Build the real SabPaisa handlers that the BossPay bridge will call.
- *
- * `bridgeBaseUrl` is the public HTTPS URL of this bridge server so we
- * can construct the SabPaisa callback URL and the redirect payment URL.
- */
+type StoredStatus = 'pending' | 'success' | 'failed';
+
+function normalizeStoredStatus(value: unknown): StoredStatus {
+  if (value === 'success' || value === 'failed' || value === 'pending') {
+    return value;
+  }
+  return 'pending';
+}
+
 export function createSabPaisaHandlers(
   config: SabPaisaConfig,
   bridgeBaseUrl: string,
+  supabase: SupabaseClient,
 ): BridgeHandlers {
   return {
     sabpaisa: {
       createCollection: async (req) => {
         const pgTxnId = `sp_${req.txn_id}`;
 
-        // SabPaisa will redirect the customer back to this URL after payment.
-        // The bridge intercepts it, decrypts, forwards callback to BossPay,
-        // then redirects the customer onward.
+        // SabPaisa will call/redirect back here after payment
         const sabpaisaCallbackUrl = `${bridgeBaseUrl}/webhooks/sabpaisa`;
 
         // BossPay sends amount in paisa — SabPaisa expects rupees
@@ -43,14 +46,12 @@ export function createSabPaisaHandlers(
           callbackUrl: sabpaisaCallbackUrl,
         });
 
-        // Store the encrypted payload so /pay/:pgTxnId can serve it
         pendingPayments.set(pgTxnId, {
           encData,
           formActionUrl,
           clientCode: config.clientCode,
         });
 
-        // Clean up after 30 minutes (payment should be initiated well before)
         setTimeout(() => pendingPayments.delete(pgTxnId), 30 * 60 * 1000);
 
         return {
@@ -61,12 +62,20 @@ export function createSabPaisaHandlers(
       },
 
       checkStatus: async (req) => {
-        // SabPaisa doesn't have a simple status-check API in the SDK.
-        // Return pending; the real status comes via the callback.
+        const { data, error } = await supabase
+          .from('bosspay_txns')
+          .select('payment_status, amount_paisa')
+          .eq('pg_transaction_id', req.pg_txn_id)
+          .maybeSingle();
+
+        if (error) {
+          console.error('[sabpaisa-status] failed to read bosspay_txns:', error);
+        }
+
         return {
-          status: 'pending' as const,
+          status: normalizeStoredStatus(data?.payment_status),
           pg_transaction_id: req.pg_txn_id,
-          amount: 0,
+          amount: Number(data?.amount_paisa ?? 0),
         };
       },
 
