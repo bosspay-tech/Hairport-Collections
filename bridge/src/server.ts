@@ -165,11 +165,13 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
       parsed['clientTxnId'] ?? parsed['client_txn_id'] ?? parsed['txnId'] ?? '';
     const amount = Number(parsed['amount'] ?? parsed['paidAmount'] ?? 0);
 
-    console.log(`SabPaisa callback: pgTxnId=${pgTxnId}, status=${status}, amount=${amount}`);
+    console.log(`[sabpaisa-webhook] pgTxnId=${pgTxnId}, status=${status}, amount=${amount}`);
 
     const bossPayStatus: 'success' | 'failed' = status === 'success' ? 'success' : 'failed';
 
     try {
+      const callbackUrl = `${API_BASE}/callbacks/sabpaisa/${pgTxnId}`;
+      console.log(`[sabpaisa-webhook] forwarding via POST → ${callbackUrl}`);
       const result = await bridge.forwardCallback({
         pgType: 'sabpaisa',
         pgTransactionId: pgTxnId,
@@ -180,9 +182,12 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
           metadata: parsed,
         },
       });
-      console.log(`Forwarded callback to BossPay: status=${result.status}, attempts=${result.attempts}`);
+      console.log(`[sabpaisa-webhook] BossPay response: HTTP ${result.status} (attempts=${result.attempts}) body=${result.body}`);
+      if (result.status === 404) {
+        console.error(`[sabpaisa-webhook] 404 from BossPay — check if ${callbackUrl} is correct and accepts POST`);
+      }
     } catch (fwdErr) {
-      console.error('Failed to forward callback to BossPay:', fwdErr);
+      console.error('[sabpaisa-webhook] failed to forward to BossPay:', fwdErr);
     }
 
     const redirectUrl = `/order-success?encResponse=${encodeURIComponent(encResponse)}`;
