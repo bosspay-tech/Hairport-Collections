@@ -21,18 +21,27 @@ function normalizeStoredStatus(value: unknown): StoredStatus {
   return 'pending';
 }
 
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
 export function createSabPaisaHandlers(
   config: SabPaisaConfig,
   bridgeBaseUrl: string,
   supabase: SupabaseClient,
 ): BridgeHandlers {
+  const normalizedBridgeBaseUrl = stripTrailingSlash(bridgeBaseUrl);
+
   return {
     sabpaisa: {
       createCollection: async (req) => {
         const pgTxnId = `sp_${req.txn_id}`;
 
-        // SabPaisa will call/redirect back here after payment
-        const sabpaisaCallbackUrl = `${bridgeBaseUrl}/webhooks/sabpaisa`;
+        // New callbacks should hit the exact route the client asked for.
+        // Keep /webhooks/sabpaisa support in server.ts as fallback for any
+        // older in-flight transactions created before this deploy.
+        const sabpaisaCallbackUrl =
+          `${normalizedBridgeBaseUrl}/wp-json/bosspay/v1/callback/sabpaisa/${req.txn_id}`;
 
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
@@ -55,7 +64,7 @@ export function createSabPaisaHandlers(
         setTimeout(() => pendingPayments.delete(pgTxnId), 30 * 60 * 1000);
 
         return {
-          payment_url: `${bridgeBaseUrl}/pay/${pgTxnId}`,
+          payment_url: `${normalizedBridgeBaseUrl}/pay/${pgTxnId}`,
           pg_transaction_id: pgTxnId,
           mode: 'redirect' as const,
         };
