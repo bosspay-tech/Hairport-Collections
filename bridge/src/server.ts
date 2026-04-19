@@ -19,7 +19,7 @@ import {
 const PORT = Number(process.env.PORT ?? 3000);
 const BRIDGE_SECRET = process.env.BOSSPAY_BRIDGE_SECRET;
 const API_BASE = process.env.BOSSPAY_API_BASE ?? 'https://api.bosspay24.com';
-const BRIDGE_BASE_URL = process.env.BRIDGE_BASE_URL; // e.g. https://hairportcollections.com
+const BRIDGE_BASE_URL = process.env.BRIDGE_BASE_URL;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -82,11 +82,7 @@ const bridge = createBossPayBridge({
 // ── Express app ────────────────────────────────────────────────────
 const app = express();
 
-// ════════════════════════════════════════════════════════════════════
-// API / BRIDGE ROUTES — must be registered BEFORE static files
-// ════════════════════════════════════════════════════════════════════
-
-// ── BossPay bridge routes (HMAC-verified) ──────────────────────────
+// ── Bridge handler ─────────────────────────────────────────────────
 const bridgeHandler = toExpress({
   ctx: {
     handlers,
@@ -97,11 +93,18 @@ const bridgeHandler = toExpress({
   bridgeSecret: BRIDGE_SECRET!,
 });
 
-// Register explicit routes for each bridge endpoint
-app.post('/wp-json/bosspay/v1/collect', bridgeHandler);
-app.post('/wp-json/bosspay/v1/payout', bridgeHandler);
-app.get('/wp-json/bosspay/v1/status/:id', bridgeHandler);
-app.get('/wp-json/bosspay/v1/health', bridgeHandler);
+// ════════════════════════════════════════════════════════════════════
+// BULLETPROOF MIDDLEWARE: intercept ALL /bosspay/v1/ requests at the
+// top of the middleware chain. This runs BEFORE express.static or any
+// SPA catch-all, so bridge routes can NEVER be shadowed by HTML.
+// ════════════════════════════════════════════════════════════════════
+app.use((req, res, next) => {
+  if (req.path.includes('/bosspay/v1/')) {
+    console.log(`[bridge] ${req.method} ${req.path} → bridgeHandler`);
+    return bridgeHandler(req, res, next);
+  }
+  next();
+});
 
 // ── /pay/:pgTxnId — auto-submitting form that POSTs to SabPaisa ───
 app.get('/pay/:pgTxnId', (req, res) => {
@@ -191,23 +194,25 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════
-// STATIC FILES + SPA FALLBACK — must come AFTER all API routes
+// STATIC FILES + SPA FALLBACK — comes LAST, after all API routes
 // ════════════════════════════════════════════════════════════════════
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, '..', 'public');
 const hasPublicDir = existsSync(publicDir);
 
 if (hasPublicDir) {
-  // Serve static assets (JS, CSS, images)
   app.use(express.static(publicDir));
 
-  // SPA fallback: any unmatched GET → index.html (for React Router)
-  app.get('{*path}', (_req, res) => {
+  // SPA fallback: unmatched GET → index.html for React Router
+  // Exclude API paths as extra safety (belt + suspenders)
+  app.get('{*path}', (req, res) => {
+    // Double-check: never serve HTML for API paths
+    if (req.path.includes('/bosspay/') || req.path.startsWith('/pay/') || req.path.startsWith('/webhooks/')) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
     res.sendFile(join(publicDir, 'index.html'));
   });
-
-  console.log(`Serving frontend from ${publicDir}`);
 }
 
 // ── Start ──────────────────────────────────────────────────────────
@@ -216,4 +221,5 @@ app.listen(PORT, () => {
   console.log(`Bridge base URL: ${BRIDGE_BASE_URL}`);
   console.log(`SabPaisa env: ${SABPAISA_ENV}`);
   if (hasPublicDir) console.log('Frontend: serving React SPA');
+  console.log('Bridge routes: /wp-json/bosspay/v1/{health,collect,payout,status/:id}');
 });

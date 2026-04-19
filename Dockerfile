@@ -23,7 +23,7 @@ ARG VITE_SABPAISA_ENV
 
 RUN npm run build
 
-# ── Stage 2: Build bridge server ────────────────────────────────────
+# ── Stage 2: Build bridge server (v4 — route ordering fix) ──────────
 FROM node:20-alpine AS bridge-build
 
 WORKDIR /app
