@@ -19,7 +19,7 @@ import {
 const PORT = Number(process.env.PORT ?? 3000);
 const BRIDGE_SECRET = process.env.BOSSPAY_BRIDGE_SECRET;
 const API_BASE = process.env.BOSSPAY_API_BASE ?? 'https://api.bosspay24.com';
-const BRIDGE_BASE_URL = process.env.BRIDGE_BASE_URL; // e.g. https://www.hairportcollections.com
+const BRIDGE_BASE_URL = process.env.BRIDGE_BASE_URL; // e.g. https://hairportcollections.com
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -82,16 +82,9 @@ const bridge = createBossPayBridge({
 // ── Express app ────────────────────────────────────────────────────
 const app = express();
 
-// ── Static files: React frontend ───────────────────────────────────
-// In production the Dockerfile copies the Vite build output into /app/public
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const publicDir = join(__dirname, '..', 'public');
-const hasPublicDir = existsSync(publicDir);
-
-if (hasPublicDir) {
-  app.use(express.static(publicDir));
-  console.log(`Serving frontend from ${publicDir}`);
-}
+// ════════════════════════════════════════════════════════════════════
+// API / BRIDGE ROUTES — must be registered BEFORE static files
+// ════════════════════════════════════════════════════════════════════
 
 // ── BossPay bridge routes (HMAC-verified) ──────────────────────────
 const bridgeHandler = toExpress({
@@ -104,8 +97,11 @@ const bridgeHandler = toExpress({
   bridgeSecret: BRIDGE_SECRET!,
 });
 
-// Express 5 requires named wildcard params (not bare *)
-app.all('/wp-json/bosspay/v1/{*path}', bridgeHandler);
+// Register explicit routes for each bridge endpoint to avoid wildcard issues
+app.post('/wp-json/bosspay/v1/collect', bridgeHandler);
+app.post('/wp-json/bosspay/v1/payout', bridgeHandler);
+app.get('/wp-json/bosspay/v1/status/:id', bridgeHandler);
+app.get('/wp-json/bosspay/v1/health', bridgeHandler);
 
 // ── /pay/:pgTxnId — auto-submitting form that POSTs to SabPaisa ───
 app.get('/pay/:pgTxnId', (req, res) => {
@@ -117,7 +113,6 @@ app.get('/pay/:pgTxnId', (req, res) => {
     return;
   }
 
-  // Serve a minimal HTML page that auto-submits the encrypted form to SabPaisa
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -146,7 +141,6 @@ app.get('/pay/:pgTxnId', (req, res) => {
 </body>
 </html>`;
 
-  // Clean up — each payment link is single-use
   pendingPayments.delete(pgTxnId);
   res.type('html').send(html);
 });
@@ -161,19 +155,15 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
       return;
     }
 
-    // Decrypt the SabPaisa response
     const parsed = decryptSabPaisaResponse(sabpaisaConfig, encResponse);
     const status = resolveSabPaisaStatus(parsed);
 
-    // Extract the pgTxnId (SabPaisa returns it as clientTxnId)
     const pgTxnId =
       parsed['clientTxnId'] ?? parsed['client_txn_id'] ?? parsed['txnId'] ?? '';
     const amount = Number(parsed['amount'] ?? parsed['paidAmount'] ?? 0);
 
     console.log(`SabPaisa callback: pgTxnId=${pgTxnId}, status=${status}, amount=${amount}`);
 
-    // Forward the callback to BossPay
-    // BossPay callback expects 'success' | 'failed' — map 'pending' to 'failed'
     const bossPayStatus: 'success' | 'failed' = status === 'success' ? 'success' : 'failed';
 
     try {
@@ -183,18 +173,15 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
         payload: {
           status: bossPayStatus,
           pg_transaction_id: pgTxnId,
-          // BossPay expects amount in paisa
           amount: Math.round(amount * 100),
           metadata: parsed,
         },
       });
       console.log(`Forwarded callback to BossPay: status=${result.status}, attempts=${result.attempts}`);
     } catch (fwdErr) {
-      // Log but don't fail the customer redirect
       console.error('Failed to forward callback to BossPay:', fwdErr);
     }
 
-    // Redirect the customer to the frontend order-success page (same origin)
     const redirectUrl = `/order-success?encResponse=${encodeURIComponent(encResponse)}`;
     res.redirect(302, redirectUrl);
   } catch (err) {
@@ -203,12 +190,24 @@ app.get('/webhooks/sabpaisa', async (req, res) => {
   }
 });
 
-// ── SPA fallback: serve index.html for all other routes ────────────
-// This must come AFTER all API/bridge routes so they take priority
+// ════════════════════════════════════════════════════════════════════
+// STATIC FILES + SPA FALLBACK — must come AFTER all API routes
+// ════════════════════════════════════════════════════════════════════
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const publicDir = join(__dirname, '..', 'public');
+const hasPublicDir = existsSync(publicDir);
+
 if (hasPublicDir) {
+  // Serve static assets (JS, CSS, images)
+  app.use(express.static(publicDir));
+
+  // SPA fallback: any unmatched GET → index.html (for React Router)
   app.get('{*path}', (_req, res) => {
     res.sendFile(join(publicDir, 'index.html'));
   });
+
+  console.log(`Serving frontend from ${publicDir}`);
 }
 
 // ── Start ──────────────────────────────────────────────────────────
