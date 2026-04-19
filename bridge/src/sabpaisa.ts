@@ -158,8 +158,23 @@ export function decryptSabPaisaResponse(
   config: SabPaisaConfig,
   encResponse: string,
 ): Record<string, string> {
+  
+  // Restore + signs that Express URL-decodes to spaces
   const cleaned = encResponse.replace(/ /g, '+');
-  const plaintext = decrypt(config.authKey, config.authIV, cleaned);
+
+  // Detect encoding: pure hex contains only 0-9 a-f A-F.
+  // If the response has +, /, or = it is base64 — convert to hex first
+  // so the decrypt function (which expects a hex string) works correctly.
+  const isHex = /^[0-9a-fA-F]+$/.test(cleaned);
+  const hexString = isHex
+    ? cleaned
+    : Buffer.from(cleaned, 'base64').toString('hex');
+
+  console.log(
+    `[sabpaisa-decrypt] encoding=${isHex ? 'hex' : 'base64'} len=${cleaned.length} sample=${cleaned.slice(0, 40)}`,
+  );
+
+  const plaintext = decrypt(config.authKey, config.authIV, hexString);  
   return Object.fromEntries(new URLSearchParams(plaintext));
 }
 
