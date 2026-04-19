@@ -46,6 +46,11 @@ export function createSabPaisaHandlers(
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
 
+        console.log('[sabpaisa-createCollection] txn_id=', req.txn_id);
+        console.log('[sabpaisa-createCollection] pgTxnId=', pgTxnId);
+        console.log('[sabpaisa-createCollection] callbackUrl=', sabpaisaCallbackUrl);
+        console.log('[sabpaisa-createCollection] amountRupees=', amountRupees);
+
         const { encData, formActionUrl } = buildSabPaisaEncData(config, {
           clientTxnId: pgTxnId,
           amount: amountRupees,
@@ -62,6 +67,8 @@ export function createSabPaisaHandlers(
         });
 
         setTimeout(() => pendingPayments.delete(pgTxnId), 30 * 60 * 1000);
+
+        console.log('[sabpaisa-createCollection] payment_url=', `${normalizedBridgeBaseUrl}/pay/${pgTxnId}`);
 
         return {
           payment_url: `${normalizedBridgeBaseUrl}/pay/${pgTxnId}`,
