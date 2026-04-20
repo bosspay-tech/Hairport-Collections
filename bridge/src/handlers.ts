@@ -112,13 +112,14 @@ export function createSabPaisaHandlers(
           `[checkStatus] pg_txn_id=${req.pg_txn_id} → clientTxnId=${clientTxnId}`,
         );
 
+        // ── Strategy 1: try SabPaisa status API (client's preferred path) ──
+        // If this works, we get the freshest status straight from the gateway.
+        // If SabPaisa rejects our encData (e.g. status API uses different keys
+        // than init API), fall back silently to Strategy 2.
         try {
-          // Call SabPaisa status API directly — this is the client's preferred
-          // approach: poll the status API rather than relying on callbacks.
           const statusResp = await querySabPaisaStatus(config, clientTxnId);
           const resolvedStatus = resolveSabPaisaStatus(statusResp);
 
-          // Amount from SabPaisa is in rupees — convert back to paisa for BossPay
           const amountRupees = Number(
             statusResp['amount'] ??
             statusResp['paidAmount'] ??
@@ -128,9 +129,24 @@ export function createSabPaisaHandlers(
           const amountPaisa = Math.round(amountRupees * 100);
 
           console.log(
-            `[checkStatus] clientTxnId=${clientTxnId} ` +
+            `[checkStatus] via status API → clientTxnId=${clientTxnId} ` +
             `status=${resolvedStatus} amount=${amountRupees}₹`,
           );
+
+          // Mirror to Supabase so cache stays current even when API works
+          try {
+            await supabase
+              .from('bosspay_txns')
+              .update({
+                payment_status: resolvedStatus,
+                amount_paisa: amountPaisa,
+                gateway_payload: { source: 'status_api', parsed: statusResp },
+                updated_at: new Date().toISOString(),
+              })
+              .eq('pg_transaction_id', clientTxnId);
+          } catch (cacheErr) {
+            console.warn('[checkStatus] cache mirror failed:', cacheErr);
+          }
 
           return {
             status: resolvedStatus,
@@ -138,9 +154,53 @@ export function createSabPaisaHandlers(
             amount: amountPaisa,
           };
         } catch (err) {
-          // Log but don't crash — return pending so BossPay retries later
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[checkStatus] status API unavailable for ${clientTxnId} — ` +
+            `falling back to cached callback data. Reason: ${errMsg}`,
+          );
+        }
+
+        // ── Strategy 2: read cached status from Supabase ─────────────────
+        // Populated by handleSabPaisaCallback when SabPaisa POSTs back.
+        // This is the previous working behaviour — keeps the system usable
+        // even if the status API keys aren't configured correctly.
+        try {
+          const { data, error } = await supabase
+            .from('bosspay_txns')
+            .select('payment_status, amount_paisa')
+            .eq('pg_transaction_id', clientTxnId)
+            .maybeSingle();
+
+          if (error) {
+            console.warn(
+              `[checkStatus] Supabase read failed for ${clientTxnId}:`,
+              error.message,
+            );
+          }
+
+          const cachedStatus =
+            data?.payment_status === 'success' ||
+            data?.payment_status === 'failed' ||
+            data?.payment_status === 'pending'
+              ? data.payment_status
+              : 'pending';
+
+          const cachedAmount = Number(data?.amount_paisa ?? 0);
+
+          console.log(
+            `[checkStatus] via cache → clientTxnId=${clientTxnId} ` +
+            `status=${cachedStatus} amount_paisa=${cachedAmount}`,
+          );
+
+          return {
+            status: cachedStatus,
+            pg_transaction_id: req.pg_txn_id,
+            amount: cachedAmount,
+          };
+        } catch (err) {
           console.error(
-            `[checkStatus] SabPaisa status API failed for ${clientTxnId}:`,
+            `[checkStatus] cache read threw for ${clientTxnId}:`,
             err,
           );
           return {
