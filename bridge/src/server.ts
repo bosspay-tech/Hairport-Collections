@@ -12,6 +12,7 @@ import { createSabPaisaHandlers, pendingPayments } from './handlers.js';
 import {
   decryptSabPaisaResponse,
   resolveSabPaisaStatus,
+  querySabPaisaStatus,
   type SabPaisaConfig,
 } from './sabpaisa.js';
 
@@ -97,9 +98,15 @@ const bridgeHandler = toExpress({
 // BULLETPROOF MIDDLEWARE: intercept ALL /bosspay/v1/ requests at the
 // top of the middleware chain. This runs BEFORE express.static or any
 // SPA catch-all, so bridge routes can NEVER be shadowed by HTML.
+//
+// EXCEPTION: /wp-json/bosspay/v1/callback/sabpaisa/* is handled by
+// our own route below — skip it here so it falls through correctly.
 // ════════════════════════════════════════════════════════════════════
 app.use((req, res, next) => {
-  if (req.path.includes('/bosspay/v1/')) {
+  if (
+    req.path.includes('/bosspay/v1/') &&
+    !req.path.includes('/bosspay/v1/callback/sabpaisa/')
+  ) {
     console.log(`[bridge] ${req.method} ${req.path} → bridgeHandler`);
     return bridgeHandler(req, res, next);
   }
@@ -148,55 +155,120 @@ app.get('/pay/:pgTxnId', (req, res) => {
   res.type('html').send(html);
 });
 
-// ── /webhooks/sabpaisa — SabPaisa callback (browser redirect) ──────
-app.get('/webhooks/sabpaisa', async (req, res) => {
+// ── SabPaisa callback handler (shared logic) ─────────────────────
+// Handles both the legacy /webhooks/sabpaisa and the per-txn
+// /wp-json/bosspay/v1/callback/sabpaisa/:txnId routes.
+// SabPaisa may call back via GET (browser redirect) or POST (server notify).
+async function handleSabPaisaCallback(
+  req: express.Request,
+  res: express.Response,
+  pgTxnIdOverride?: string,
+) {
   try {
-    const encResponse = req.query['encResponse'] as string | undefined;
+    // encResponse may arrive as a query-param (GET) or in the body (POST)
+    const encResponse =
+      (req.query['encResponse'] as string | undefined) ??
+      (req.body as Record<string, string> | undefined)?.['encResponse'];
 
-    if (!encResponse) {
+    let parsed: Record<string, string>;
+    let pgTxnId: string;
+    let amount: number;
+
+    if (encResponse) {
+      // Decrypt the encrypted response from SabPaisa
+      parsed = decryptSabPaisaResponse(sabpaisaConfig, encResponse);
+      pgTxnId =
+        pgTxnIdOverride ??
+        parsed['clientTxnId'] ??
+        parsed['client_txn_id'] ??
+        parsed['txnId'] ??
+        '';
+      amount = Number(parsed['amount'] ?? parsed['paidAmount'] ?? 0);
+    } else if (pgTxnIdOverride) {
+      // No encResponse — fall back to polling the status API directly
+      console.log(
+        `[sabpaisa-callback] no encResponse for ${pgTxnIdOverride}, ` +
+        `falling back to status API`,
+      );
+      parsed = await querySabPaisaStatus(sabpaisaConfig, pgTxnIdOverride);
+      pgTxnId = pgTxnIdOverride;
+      amount = Number(parsed['amount'] ?? parsed['paidAmount'] ?? 0);
+    } else {
       res.status(400).send('Missing encResponse parameter.');
       return;
     }
 
-    const parsed = decryptSabPaisaResponse(sabpaisaConfig, encResponse);
-    const status = resolveSabPaisaStatus(parsed);
+    const resolvedStatus = resolveSabPaisaStatus(parsed);
+    const bossPayStatus: 'success' | 'failed' =
+      resolvedStatus === 'success' ? 'success' : 'failed';
 
-    const pgTxnId =
-      parsed['clientTxnId'] ?? parsed['client_txn_id'] ?? parsed['txnId'] ?? '';
-    const amount = Number(parsed['amount'] ?? parsed['paidAmount'] ?? 0);
+    console.log(
+      `[sabpaisa-callback] pgTxnId=${pgTxnId} status=${resolvedStatus} ` +
+      `amount=${amount}`,
+    );
 
-    console.log(`[sabpaisa-webhook] pgTxnId=${pgTxnId}, status=${status}, amount=${amount}`);
-
-    const bossPayStatus: 'success' | 'failed' = status === 'success' ? 'success' : 'failed';
-
+    // Forward result to BossPay
     try {
-      const callbackUrl = `${API_BASE}/callbacks/sabpaisa/${pgTxnId}`;
-      console.log(`[sabpaisa-webhook] forwarding via POST → ${callbackUrl}`);
       const result = await bridge.forwardCallback({
         pgType: 'sabpaisa',
         pgTransactionId: pgTxnId,
         payload: {
           status: bossPayStatus,
           pg_transaction_id: pgTxnId,
-          amount: Math.round(amount * 100),
+          amount: Math.round(amount * 100), // rupees → paisa
           metadata: parsed,
         },
       });
-      console.log(`[sabpaisa-webhook] BossPay response: HTTP ${result.status} (attempts=${result.attempts}) body=${result.body}`);
+      console.log(
+        `[sabpaisa-callback] BossPay response: HTTP ${result.status} ` +
+        `(attempts=${result.attempts})`,
+      );
       if (result.status === 404) {
-        console.error(`[sabpaisa-webhook] 404 from BossPay — check if ${callbackUrl} is correct and accepts POST`);
+        console.error(
+          `[sabpaisa-callback] 404 from BossPay — pgTxnId=${pgTxnId} ` +
+          `may not be registered yet`,
+        );
       }
     } catch (fwdErr) {
-      console.error('[sabpaisa-webhook] failed to forward to BossPay:', fwdErr);
+      console.error('[sabpaisa-callback] forwardCallback error:', fwdErr);
     }
 
-    const redirectUrl = `/order-success?encResponse=${encodeURIComponent(encResponse)}`;
-    res.redirect(302, redirectUrl);
+    // For GET requests (browser redirects), send the user to the order-success page.
+    // For POST requests (server-to-server), just acknowledge.
+    if (req.method === 'GET') {
+      const qs = encResponse
+        ? `?encResponse=${encodeURIComponent(encResponse)}`
+        : `?txn_id=${pgTxnId}&status=${resolvedStatus}`;
+      res.redirect(302, `/order-success${qs}`);
+    } else {
+      res.json({ received: true });
+    }
   } catch (err) {
-    console.error('Error handling SabPaisa callback:', err);
+    console.error('[sabpaisa-callback] unhandled error:', err);
     res.status(500).send('Error processing payment callback.');
   }
-});
+}
+
+// Legacy shared webhook URL (GET — browser redirect from SabPaisa)
+app.get('/webhooks/sabpaisa', (req, res) =>
+  handleSabPaisaCallback(req, res),
+);
+
+// Per-transaction callback URL — handles both POST (SabPaisa server notify)
+// and GET (browser redirect).  The bridge interceptor above explicitly
+// excludes /callback/sabpaisa/* so this route fires correctly.
+app.all(
+  '/wp-json/bosspay/v1/callback/sabpaisa/:txnId',
+  express.json(),
+  express.urlencoded({ extended: false }),
+  (req, res) => {
+    const { txnId } = req.params;
+    console.log(
+      `[sabpaisa-callback] ${req.method} /wp-json/bosspay/v1/callback/sabpaisa/${txnId}`,
+    );
+    handleSabPaisaCallback(req, res, txnId);
+  },
+);
 
 // ════════════════════════════════════════════════════════════════════
 // STATIC FILES + SPA FALLBACK — comes LAST, after all API routes

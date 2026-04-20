@@ -1,94 +1,78 @@
 /**
- * Server-side SabPaisa encryption/decryption + payment URL generation.
- * Ported from sabpaisa-pg-dev (browser SDK) to work in Node.js 18+.
+ * SabPaisa AES-128-CBC encryption/decryption + payment helpers.
  *
- * Uses Node's built-in crypto module (not webcrypto) for clean type compat.
+ * SabPaisa's S2S (server-to-server) API uses AES-128-CBC with PKCS7 padding.
+ * The same authKey / authIV from the SabPaisa dashboard are used for both
+ * encrypting outbound requests and decrypting inbound responses.
+ *
+ * Flow:
+ *   collect  → buildSabPaisaEncData  → encrypted form POST to SabPaisa
+ *   status   → querySabPaisaStatus   → encrypted POST to status API, decrypt response
+ *   callback → decryptSabPaisaResponse → decrypt encResponse from SabPaisa
  */
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHmac,
-  randomBytes,
-  timingSafeEqual,
-} from 'node:crypto';
-
-const IV_SIZE = 12;
-const TAG_SIZE = 16;
-const HMAC_LENGTH = 48; // SHA-384 = 48 bytes
+import { createCipheriv, createDecipheriv } from 'node:crypto';
 
 // ── SabPaisa environment URLs ──────────────────────────────────────
-const SABPAISA_URLS: Record<string, string> = {
+const SABPAISA_FORM_URLS: Record<string, string> = {
   uat: 'https://secure.sabpaisa.in/SabPaisa/sabPaisaInit?v=1',
   stag: 'https://stage-securepay.sabpaisa.in/SabPaisa/sabPaisaInit?v=1',
   prod: 'https://securepay.sabpaisa.in/SabPaisa/sabPaisaInit?v=1',
 };
 
-function getPaymentUrl(env: string): string {
-  return SABPAISA_URLS[env] ?? SABPAISA_URLS['stag'];
+const SABPAISA_STATUS_URL =
+  'https://txnenquiry.sabpaisa.in/SPTxtnEnquiry/getTxnStatusByClientxnId';
+
+// ── Key normalisation ──────────────────────────────────────────────
+/**
+ * SabPaisa provides authKey and authIV as plain strings from the dashboard
+ * (typically 16-character raw strings for AES-128).
+ * We also handle the case where they've been base64-encoded in env vars.
+ */
+function normalizeKey(key: string, expectedBytes: number): Buffer {
+  // Try raw UTF-8 first — most common for SabPaisa dashboard keys
+  const utf8 = Buffer.from(key, 'utf8');
+  if (utf8.length === expectedBytes) return utf8;
+
+  // Try base64 decode
+  const b64 = Buffer.from(key, 'base64');
+  if (b64.length === expectedBytes) return b64;
+
+  // Fallback: zero-pad or truncate to expectedBytes
+  console.warn(
+    `[sabpaisa] authKey/authIV length mismatch: expected ${expectedBytes} bytes, ` +
+    `got utf8=${utf8.length} / base64=${b64.length}. Padding/truncating.`,
+  );
+  const buf = Buffer.alloc(expectedBytes, 0);
+  utf8.copy(buf, 0, 0, Math.min(utf8.length, expectedBytes));
+  return buf;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────
-function bytesToHex(buf: Buffer): string {
-  return buf.toString('hex').toUpperCase();
+// ── AES-128-CBC primitives ─────────────────────────────────────────
+
+function cbc128Encrypt(key: string, iv: string, plaintext: string): string {
+  const k = normalizeKey(key, 16);
+  const i = normalizeKey(iv, 16);
+  const cipher = createCipheriv('aes-128-cbc', k, i);
+  const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  // SabPaisa docs say Base64 or Hex; we use HEX (uppercase) to match the
+  // browser SDK convention and avoid URL-encoding issues with Base64's +/=
+  return enc.toString('hex').toUpperCase();
 }
 
-function hexToBuffer(hex: string): Buffer {
-  return Buffer.from(hex, 'hex');
-}
+function cbc128Decrypt(key: string, iv: string, ciphertext: string): string {
+  const k = normalizeKey(key, 16);
+  const i = normalizeKey(iv, 16);
 
-// ── AES-256-GCM + HMAC-SHA384 (same algorithm as sabpaisa-pg-dev) ─
+  // Accept both HEX and Base64 — SabPaisa may return either
+  const trimmed = ciphertext.trim().replace(/\s+/g, '');
+  const isHex = /^[0-9a-fA-F]+$/.test(trimmed);
+  const buf = isHex
+    ? Buffer.from(trimmed, 'hex')
+    : Buffer.from(trimmed, 'base64');
 
-function encrypt(aesKeyBase64: string, hmacKeyBase64: string, plaintext: string): string {
-  const aesKey = Buffer.from(aesKeyBase64, 'base64');
-  const hmacKey = Buffer.from(hmacKeyBase64, 'base64');
-
-  const iv = randomBytes(IV_SIZE);
-
-  const cipher = createCipheriv('aes-256-gcm', aesKey, iv, { authTagLength: TAG_SIZE });
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-
-  // encryptedMessage = iv + ciphertext + authTag
-  const encryptedMessage = Buffer.concat([iv, encrypted, authTag]);
-
-  // HMAC-SHA384 over the encryptedMessage
-  const hmac = createHmac('sha384', hmacKey).update(encryptedMessage).digest();
-
-  // final = hmac + encryptedMessage
-  const finalBuffer = Buffer.concat([hmac, encryptedMessage]);
-  return bytesToHex(finalBuffer);
-}
-
-function decrypt(aesKeyBase64: string, hmacKeyBase64: string, hexCipherText: string): string {
-  const aesKey = Buffer.from(aesKeyBase64, 'base64');
-  const hmacKey = Buffer.from(hmacKeyBase64, 'base64');
-  const fullMessage = hexToBuffer(hexCipherText);
-
-  if (fullMessage.length < HMAC_LENGTH + IV_SIZE + TAG_SIZE) {
-    throw new Error('Invalid ciphertext length');
-  }
-
-  const hmacReceived = fullMessage.subarray(0, HMAC_LENGTH);
-  const encryptedData = fullMessage.subarray(HMAC_LENGTH);
-
-  // Verify HMAC
-  const hmacComputed = createHmac('sha384', hmacKey).update(encryptedData).digest();
-  if (!timingSafeEqual(hmacReceived, hmacComputed)) {
-    throw new Error('HMAC validation failed — data may be tampered');
-  }
-
-  const iv = encryptedData.subarray(0, IV_SIZE);
-  const cipherTextWithTag = encryptedData.subarray(IV_SIZE);
-
-  // AES-GCM: last TAG_SIZE bytes are the auth tag
-  const cipherText = cipherTextWithTag.subarray(0, cipherTextWithTag.length - TAG_SIZE);
-  const authTag = cipherTextWithTag.subarray(cipherTextWithTag.length - TAG_SIZE);
-
-  const decipher = createDecipheriv('aes-256-gcm', aesKey, iv, { authTagLength: TAG_SIZE });
-  decipher.setAuthTag(authTag);
-
-  const decrypted = Buffer.concat([decipher.update(cipherText), decipher.final()]);
-  return decrypted.toString('utf-8');
+  const decipher = createDecipheriv('aes-128-cbc', k, i);
+  const dec = Buffer.concat([decipher.update(buf), decipher.final()]);
+  return dec.toString('utf8');
 }
 
 // ── Public API ─────────────────────────────────────────────────────
@@ -97,88 +81,159 @@ export interface SabPaisaConfig {
   clientCode: string;
   transUserName: string;
   transUserPassword: string;
-  authKey: string;   // base64 AES key
-  authIV: string;    // base64 HMAC key
-  env: string;       // 'uat' | 'stag' | 'prod'
+  authKey: string; // plain string from SabPaisa dashboard (16-char raw or base64)
+  authIV: string;  // plain string from SabPaisa dashboard (16-char raw or base64)
+  env: string;     // 'uat' | 'stag' | 'prod'
 }
 
 export interface SabPaisaPaymentParams {
   clientTxnId: string;
-  amount: number;
+  amount: number;     // in rupees
   payerName: string;
   payerEmail: string;
   payerMobile: string;
   callbackUrl: string;
-  channelId?: string;
-  udf1?: string;
-  udf2?: string;
-  udf3?: string;
-  udf4?: string;
-  udf5?: string;
 }
 
 /**
- * Build the encrypted `encData` payload and return it along with the
- * SabPaisa form-post URL. The bridge serves an auto-submitting HTML
- * page at `/pay/:pgTxnId` so that the redirect works.
+ * Build the AES-128-CBC encrypted `encData` payload for SabPaisa's
+ * form-POST endpoint and return it together with the form action URL.
  */
 export function buildSabPaisaEncData(
   config: SabPaisaConfig,
   params: SabPaisaPaymentParams,
 ): { encData: string; formActionUrl: string } {
   const qs = new URLSearchParams({
-    payerName: params.payerName,
-    payerEmail: params.payerEmail,
-    payerMobile: params.payerMobile,
-    clientTxnId: params.clientTxnId,
-    amount: String(params.amount),
     clientCode: config.clientCode,
     transUserName: config.transUserName,
     transUserPassword: config.transUserPassword,
-    callbackUrl: params.callbackUrl,
-    channelId: params.channelId ?? 'npm',
-    udf1: params.udf1 ?? '',
-    udf2: params.udf2 ?? '',
-    udf3: params.udf3 ?? '',
-    udf4: params.udf4 ?? '',
-    udf5: params.udf5 ?? '',
+    clientTxnId: params.clientTxnId,
+    amount: String(params.amount),
+    // SabPaisa form field names (confirmed from browser SDK + S2S spec)
+    payerFirstName: params.payerName,
+    payerEmail: params.payerEmail,
+    payerContact: params.payerMobile,
+    callbackURL: params.callbackUrl,
+    channelId: 'npm',
+    udf1: '',
+    udf2: '',
+    udf3: '',
+    udf4: '',
+    udf5: '',
   });
 
-  const encData = encrypt(config.authKey, config.authIV, qs.toString());
-  const formActionUrl = getPaymentUrl(config.env.toLowerCase());
+  const encData = cbc128Encrypt(config.authKey, config.authIV, qs.toString());
+  const formActionUrl =
+    SABPAISA_FORM_URLS[config.env.toLowerCase()] ?? SABPAISA_FORM_URLS['stag'];
 
   return { encData, formActionUrl };
 }
 
 /**
- * Decrypt the `encResponse` query-param that SabPaisa appends
- * when redirecting back to the callback URL.
+ * Query SabPaisa's transaction status API for a given clientTxnId.
+ *
+ * Encrypts the request with AES-128-CBC, POSTs to the enquiry endpoint,
+ * then decrypts the response (same algorithm).
+ *
+ * Returns the decoded key/value fields from SabPaisa's response.
+ */
+export async function querySabPaisaStatus(
+  config: SabPaisaConfig,
+  clientTxnId: string,
+): Promise<Record<string, string>> {
+  // Step 1: build & encrypt the status request payload
+  const plaintext = `clientCode=${config.clientCode}&clientTxnId=${clientTxnId}`;
+  const statusTransEncData = cbc128Encrypt(config.authKey, config.authIV, plaintext);
+
+  console.log(
+    `[sabpaisa-status] querying clientTxnId=${clientTxnId} ` +
+    `encData_sample=${statusTransEncData.slice(0, 40)}...`,
+  );
+
+  // Step 2: POST to SabPaisa status API
+  const resp = await fetch(SABPAISA_STATUS_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      clientCode: config.clientCode,
+      statusTransEncData,
+    }),
+  });
+
+  const rawText = await resp.text();
+  console.log(
+    `[sabpaisa-status] HTTP ${resp.status} raw=${rawText.slice(0, 300)}`,
+  );
+
+  if (!resp.ok) {
+    throw new Error(
+      `SabPaisa status API HTTP ${resp.status}: ${rawText.slice(0, 200)}`,
+    );
+  }
+
+  // Step 3: parse response
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    // Some SabPaisa environments return URL-encoded plaintext directly
+    try {
+      return Object.fromEntries(new URLSearchParams(rawText));
+    } catch {
+      throw new Error(
+        `SabPaisa status API non-JSON, non-QS response: ${rawText.slice(0, 100)}`,
+      );
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      `Unexpected SabPaisa status response shape: ${rawText.slice(0, 100)}`,
+    );
+  }
+
+  const obj = parsed as Record<string, unknown>;
+
+  // Step 4: if there's an encResponse field, decrypt it (same algorithm)
+  if (typeof obj['encResponse'] === 'string' && obj['encResponse'].trim()) {
+    const decrypted = cbc128Decrypt(
+      config.authKey,
+      config.authIV,
+      obj['encResponse'],
+    );
+    console.log(`[sabpaisa-status] decrypted=${decrypted.slice(0, 200)}`);
+    return Object.fromEntries(new URLSearchParams(decrypted));
+  }
+
+  // Otherwise normalize all values to strings and return directly
+  return Object.fromEntries(
+    Object.entries(obj).map(([k, v]) => [k, v == null ? '' : String(v)]),
+  );
+}
+
+/**
+ * Decrypt the `encResponse` query-param that SabPaisa appends to the
+ * callback redirect URL (browser GET) or POSTs in the callback body.
  */
 export function decryptSabPaisaResponse(
   config: SabPaisaConfig,
   encResponse: string,
 ): Record<string, string> {
-  // Restore + signs that Express URL-decodes to spaces
+  // Express URL-decodes '+' as space — restore it
   const cleaned = encResponse.replace(/ /g, '+');
-
-  // Detect encoding: pure hex contains only 0-9 a-f A-F.
-  // If the response has +, /, or = it is base64 — convert to hex first
-  // so the decrypt function (which expects a hex string) works correctly.
-  const isHex = /^[0-9a-fA-F]+$/.test(cleaned);
-  const hexString = isHex
-    ? cleaned
-    : Buffer.from(cleaned, 'base64').toString('hex');
-
   console.log(
-    `[sabpaisa-decrypt] encoding=${isHex ? 'hex' : 'base64'} len=${cleaned.length} sample=${cleaned.slice(0, 40)}`,
+    `[sabpaisa-decrypt] len=${cleaned.length} sample=${cleaned.slice(0, 40)}`,
   );
-
-  const plaintext = decrypt(config.authKey, config.authIV, hexString);
+  const plaintext = cbc128Decrypt(config.authKey, config.authIV, cleaned);
   return Object.fromEntries(new URLSearchParams(plaintext));
 }
 
 /**
- * Resolve the payment status from a decrypted SabPaisa response.
+ * Resolve a normalised payment status from any SabPaisa response object.
+ * Works for both status API responses and callback decrypted payloads.
  */
 export function resolveSabPaisaStatus(
   response: Record<string, string>,
@@ -186,7 +241,7 @@ export function resolveSabPaisaStatus(
   const statusFields = [
     'status', 'txnStatus', 'paymentStatus', 'spRespStatus',
     'responseStatus', 'txn_status', 'payment_status',
-    'responseCode', 'spRespCode',
+    'responseCode', 'spRespCode', 'transStatus',
   ];
   const messageFields = [
     'message', 'statusMessage', 'responseMessage',
@@ -201,10 +256,17 @@ export function resolveSabPaisaStatus(
     return '';
   };
 
-  const combined = `${getFirst(statusFields)} ${getFirst(messageFields)}`.toLowerCase();
+  const combined =
+    `${getFirst(statusFields)} ${getFirst(messageFields)}`.toLowerCase();
 
-  const successWords = ['success', 'successful', 'succeeded', 'captured', 'completed', 'approved', 'paid', '0300'];
-  const failedWords = ['fail', 'failed', 'failure', 'declined', 'cancelled', 'canceled', 'aborted', 'error', 'invalid'];
+  const successWords = [
+    'success', 'successful', 'succeeded', 'captured',
+    'completed', 'approved', 'paid', '0300',
+  ];
+  const failedWords = [
+    'fail', 'failed', 'failure', 'declined',
+    'cancelled', 'canceled', 'aborted', 'error', 'invalid',
+  ];
 
   if (successWords.some((w) => combined.includes(w))) return 'success';
   if (failedWords.some((w) => combined.includes(w))) return 'failed';
