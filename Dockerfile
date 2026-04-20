@@ -32,7 +32,10 @@ RUN npm install
 COPY bridge/tsconfig.json ./
 COPY bridge/src/ src/
 
-RUN npm run build
+# tsc compiles .ts → dist/, but doesn't copy .json assets. The customer pool
+# is loaded at runtime via readFileSync next to the compiled JS, so we stage
+# it into dist/ before the prod image copies dist/ over.
+RUN npm run build && cp src/customer-pool.json dist/customer-pool.json
 
 # ── Stage 3: Production image ──────────────────────────────────────
 FROM node:20-alpine

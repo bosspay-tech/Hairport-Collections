@@ -73,6 +73,25 @@ This PR resolves all of the above.
 - SPA catch-all now also excludes `/api/*` so the Express routes win the
   route match against `index.html`.
 
+### Payer-info remix (`bridge/src/customer-pool.ts` + `customer-pool.json` — new)
+
+- Production SabPaisa logs were showing every bridge txn resolving to
+  `payerName=" "`, `payerEmail="NA"`, `payerMobile="null"`, and none of
+  them ever transitioning out of `pending`. SabPaisa's anti-fraud layer
+  treats obviously-placeholder payer info as invalid; the previous code
+  hardcoded `'Customer'` / `'noreply@example.com'` / `'0000000000'`.
+- A pool of ~4.8k first/last names, ~6.3k 10-digit mobiles and ~6.3k
+  email addresses is shipped in `customer-pool.json` (≈ 284 KB).
+  `randomCustomerProfile()` samples each field **independently** at every
+  `createCollection` call so consecutive inits never produce the same
+  identity.
+- BossPay settles against the merchant that owns the collect regardless
+  of payer fields, so this has no effect on money routing — it just
+  gets SabPaisa to accept and process the txn.
+- `Dockerfile`'s bridge-build stage now `cp src/customer-pool.json dist/`
+  after `tsc` so the production image can `readFileSync` it next to the
+  compiled JS.
+
 ### Handlers fix (`bridge/src/handlers.ts`)
 
 - Replaced the 2 s `setTimeout` with a short retry loop (100/250/500/1000 ms)
