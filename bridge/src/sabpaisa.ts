@@ -58,8 +58,9 @@ function resolveAesKey(keyStr: string): { keyBuf: Buffer; algo: 'aes-128-cbc' | 
 /**
  * Resolve the AES-CBC IV (always 16 bytes).
  *
- * If the string decodes to more than 16 bytes (e.g. 48-byte HMAC key stored
- * as authIV), take the first 16 bytes of the decoded value.
+ * SabPaisa may store the IV as a raw 16-char string. If the env var is
+ * longer (e.g. the HMAC key from the browser SDK), we try multiple approaches
+ * in priority order: raw-16, base64-decoded-16, first-16-of-raw-string.
  */
 function resolveAesIV(ivStr: string): Buffer {
   const utf8 = Buffer.from(ivStr, 'utf8');
@@ -68,35 +69,56 @@ function resolveAesIV(ivStr: string): Buffer {
   const b64 = Buffer.from(ivStr, 'base64');
   if (b64.length === 16) return b64;
 
-  // Take first 16 bytes of whichever representation is larger (decoded bytes)
-  const larger = b64.length > utf8.length ? b64 : utf8;
-  console.warn(
-    `[sabpaisa] authIV unexpected size: utf8=${utf8.length} base64=${b64.length}. ` +
-    `Using first 16 bytes.`,
-  );
+  // Common SabPaisa pattern: the IV is the first 16 characters of the raw
+  // key string (not base64 decoded), e.g. "abcdefghijklmnop..."
+  const rawFirst16 = Buffer.from(ivStr.slice(0, 16), 'utf8');
+  if (rawFirst16.length === 16) {
+    console.warn(
+      `[sabpaisa] authIV: utf8=${utf8.length} b64=${b64.length}. ` +
+      `Using first 16 raw chars.`,
+    );
+    return rawFirst16;
+  }
+
+  // Last resort: first 16 bytes of the base64-decoded value
   const buf = Buffer.alloc(16, 0);
-  larger.copy(buf, 0, 0, Math.min(larger.length, 16));
+  const larger = b64.length > utf8.length ? b64 : utf8;
+  larger.copy(buf, 0, 0, 16);
   return buf;
 }
 
 // ── AES-CBC encrypt / decrypt (auto-selects 128 or 256) ───────────
 
-function cbcEncrypt(keyStr: string, ivStr: string, plaintext: string): string {
+function cbcEncrypt(
+  keyStr: string,
+  ivStr: string,
+  plaintext: string,
+  outFormat: 'hex' | 'base64' = 'hex',
+): string {
   const { keyBuf, algo } = resolveAesKey(keyStr);
   const ivBuf = resolveAesIV(ivStr);
 
-  console.log(`[sabpaisa-crypto] encrypt algo=${algo} keyLen=${keyBuf.length} ivLen=${ivBuf.length}`);
+  console.log(
+    `[sabpaisa-crypto] encrypt algo=${algo} keyLen=${keyBuf.length} ` +
+    `ivLen=${ivBuf.length} outFmt=${outFormat} ` +
+    `keyHex=${keyBuf.toString('hex').slice(0, 16)}... ` +
+    `ivHex=${ivBuf.toString('hex')}`,
+  );
 
   const cipher = createCipheriv(algo, keyBuf, ivBuf);
   const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  return enc.toString('hex').toUpperCase();
+  return outFormat === 'base64'
+    ? enc.toString('base64')
+    : enc.toString('hex').toUpperCase();
 }
 
 function cbcDecrypt(keyStr: string, ivStr: string, ciphertext: string): string {
   const { keyBuf, algo } = resolveAesKey(keyStr);
   const ivBuf = resolveAesIV(ivStr);
 
-  console.log(`[sabpaisa-crypto] decrypt algo=${algo} keyLen=${keyBuf.length} ivLen=${ivBuf.length}`);
+  console.log(
+    `[sabpaisa-crypto] decrypt algo=${algo} keyLen=${keyBuf.length} ivLen=${ivBuf.length}`,
+  );
 
   const trimmed = ciphertext.trim().replace(/\s+/g, '');
   const isHex = /^[0-9a-fA-F]+$/.test(trimmed);
@@ -175,81 +197,116 @@ export function buildSabPaisaEncData(
  *
  * Returns the decoded key/value fields from SabPaisa's response.
  */
-export async function querySabPaisaStatus(
-  config: SabPaisaConfig,
-  clientTxnId: string,
-): Promise<Record<string, string>> {
-  // Step 1: build & encrypt the status request payload
-  const plaintext = `clientCode=${config.clientCode}&clientTxnId=${clientTxnId}`;
-  const statusTransEncData = cbc128Encrypt(config.authKey, config.authIV, plaintext);
-
+/**
+ * POST to SabPaisa status API with a given statusTransEncData value.
+ * Returns { status, body } so the caller can decide what to do.
+ */
+async function postSabPaisaStatus(
+  clientCode: string,
+  statusTransEncData: string,
+  label: string,
+): Promise<{ ok: boolean; status: number; body: string }> {
   console.log(
-    `[sabpaisa-status] querying clientTxnId=${clientTxnId} ` +
-    `encData_sample=${statusTransEncData.slice(0, 40)}...`,
+    `[sabpaisa-status] attempt fmt=${label} encData=${statusTransEncData.slice(0, 50)}...`,
   );
-
-  // Step 2: POST to SabPaisa status API
   const resp = await fetch(SABPAISA_STATUS_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({
-      clientCode: config.clientCode,
-      statusTransEncData,
-    }),
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ clientCode, statusTransEncData }),
   });
+  const body = await resp.text();
+  console.log(`[sabpaisa-status] fmt=${label} HTTP ${resp.status} raw=${body.slice(0, 200)}`);
+  return { ok: resp.ok, status: resp.status, body };
+}
 
-  const rawText = await resp.text();
-  console.log(
-    `[sabpaisa-status] HTTP ${resp.status} raw=${rawText.slice(0, 300)}`,
-  );
-
-  if (!resp.ok) {
-    throw new Error(
-      `SabPaisa status API HTTP ${resp.status}: ${rawText.slice(0, 200)}`,
-    );
-  }
-
-  // Step 3: parse response
+/**
+ * Parse the raw response body from the SabPaisa status API.
+ *
+ * SabPaisa can respond with:
+ *   - JSON containing an `encResponse` field → decrypt with AES-CBC, then parse as QS
+ *   - Plain JSON object (all fields already decoded)
+ *   - URL-encoded query string directly (rare / some UAT environments)
+ */
+function parseSabPaisaStatusBody(
+  config: SabPaisaConfig,
+  rawBody: string,
+  label: string,
+): Record<string, string> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(rawText);
+    parsed = JSON.parse(rawBody);
   } catch {
     // Some SabPaisa environments return URL-encoded plaintext directly
     try {
-      return Object.fromEntries(new URLSearchParams(rawText));
+      const qs = Object.fromEntries(new URLSearchParams(rawBody));
+      console.log(`[sabpaisa-status] fmt=${label} parsed as QS: ${Object.keys(qs).join(',')}`);
+      return qs;
     } catch {
       throw new Error(
-        `SabPaisa status API non-JSON, non-QS response: ${rawText.slice(0, 100)}`,
+        `SabPaisa status API non-JSON, non-QS response: ${rawBody.slice(0, 100)}`,
       );
     }
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(
-      `Unexpected SabPaisa status response shape: ${rawText.slice(0, 100)}`,
+      `Unexpected SabPaisa status response shape: ${rawBody.slice(0, 100)}`,
     );
   }
 
   const obj = parsed as Record<string, unknown>;
 
-  // Step 4: if there's an encResponse field, decrypt it (same algorithm)
+  // If there's an encResponse field, decrypt it with the same AES-CBC key
   if (typeof obj['encResponse'] === 'string' && obj['encResponse'].trim()) {
-    const decrypted = cbc128Decrypt(
-      config.authKey,
-      config.authIV,
-      obj['encResponse'],
-    );
-    console.log(`[sabpaisa-status] decrypted=${decrypted.slice(0, 200)}`);
+    const decrypted = cbc128Decrypt(config.authKey, config.authIV, obj['encResponse']);
+    console.log(`[sabpaisa-status] fmt=${label} decrypted encResponse=${decrypted.slice(0, 200)}`);
     return Object.fromEntries(new URLSearchParams(decrypted));
   }
 
-  // Otherwise normalize all values to strings and return directly
-  return Object.fromEntries(
+  // Plain JSON — normalize all values to strings
+  const result = Object.fromEntries(
     Object.entries(obj).map(([k, v]) => [k, v == null ? '' : String(v)]),
   );
+  console.log(`[sabpaisa-status] fmt=${label} plain JSON fields=${Object.keys(result).join(',')}`);
+  return result;
+}
+
+export async function querySabPaisaStatus(
+  config: SabPaisaConfig,
+  clientTxnId: string,
+): Promise<Record<string, string>> {
+  const plaintext = `clientCode=${config.clientCode}&clientTxnId=${clientTxnId}`;
+
+  // Try both output formats — SabPaisa S2S may expect base64 or hex
+  // depending on dashboard/environment configuration.
+  const attempts: Array<{ encData: string; label: string }> = [
+    {
+      encData: cbc128Encrypt(config.authKey, config.authIV, plaintext, 'base64'),
+      label: 'base64',
+    },
+    {
+      encData: cbc128Encrypt(config.authKey, config.authIV, plaintext, 'hex'),
+      label: 'hex',
+    },
+  ];
+
+  let lastError = '';
+
+  for (const { encData, label } of attempts) {
+    const result = await postSabPaisaStatus(config.clientCode, encData, label);
+
+    if (result.ok) {
+      return parseSabPaisaStatusBody(config, result.body, label);
+    }
+
+    lastError = `HTTP ${result.status}: ${result.body.slice(0, 100)}`;
+
+    // Only try the next format if SabPaisa explicitly complained about
+    // the encData format — otherwise a different error won't be fixed by retrying.
+    if (!result.body.toLowerCase().includes('statusTransEncData'.toLowerCase())) break;
+  }
+
+  throw new Error(`SabPaisa status API failed — ${lastError}`);
 }
 
 /**
