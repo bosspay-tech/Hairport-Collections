@@ -19,6 +19,49 @@ function stripTrailingSlash(value: string): string {
 }
 
 /**
+ * Upsert `gateway_payload` on the bosspay_txns row. The row is written by
+ * `handleCollect` in `@bosspay/bridge-node` immediately AFTER the lender's
+ * `createCollection` resolves, so on fast Supabase round-trips we may race
+ * ahead of the insert. Retry a few times with short backoff; if all retries
+ * miss, the SabPaisa reconciler (or a subsequent client request) will
+ * repopulate from the in-memory `pendingPayments` Map.
+ */
+async function persistGatewayPayload(
+  supabase: SupabaseClient,
+  clientTxnId: string,
+  paymentEntry: { encData: string; formActionUrl: string; clientCode: string },
+): Promise<void> {
+  const delays = [100, 250, 500, 1000];
+  for (let i = 0; i < delays.length; i += 1) {
+    await new Promise((r) => setTimeout(r, delays[i]));
+    try {
+      const { data, error } = await supabase
+        .from('bosspay_txns')
+        .update({
+          gateway_payload: paymentEntry,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('pg_transaction_id', clientTxnId)
+        .select('pg_transaction_id');
+      if (error) {
+        console.warn('[sabpaisa-createCollection] persist error:', error.message);
+        continue;
+      }
+      if (data && data.length > 0) {
+        console.log('[sabpaisa-createCollection] Supabase persist ok:', clientTxnId);
+        return;
+      }
+    } catch (err) {
+      console.warn('[sabpaisa-createCollection] persist threw:', err);
+    }
+  }
+  console.warn(
+    `[sabpaisa-createCollection] gave up persisting gateway_payload for ${clientTxnId} ` +
+      `after ${delays.length} retries; in-memory Map will serve /pay for the 30min TTL.`,
+  );
+}
+
+/**
  * Build the real SabPaisa handlers that the BossPay bridge will call.
  *
  * `bridgeBaseUrl` is the public HTTPS URL of this bridge server
@@ -71,25 +114,12 @@ export function createSabPaisaHandlers(
         setTimeout(() => pendingPayments.delete(clientTxnId), 30 * 60 * 1000);
 
         // Persist to Supabase so the /pay/:pgTxnId page survives server restarts.
-        // Delay 2 s to allow SupabaseTxnStore to create the row first.
-        setTimeout(async () => {
-          try {
-            const { error } = await supabase
-              .from('bosspay_txns')
-              .update({
-                gateway_payload: paymentEntry,
-                updated_at: new Date().toISOString(),
-              })
-              .eq('pg_transaction_id', clientTxnId);
-            if (error) {
-              console.warn('[sabpaisa-createCollection] Supabase persist error:', error.message);
-            } else {
-              console.log('[sabpaisa-createCollection] Supabase persist ok:', clientTxnId);
-            }
-          } catch (err) {
-            console.warn('[sabpaisa-createCollection] Supabase persist threw:', err);
-          }
-        }, 2000);
+        // The bridge's `handleCollect` writes the TxnStore row AFTER this
+        // handler returns, so the row may not exist yet when we try to update
+        // it. Short retry loop covers the race without the old 2 s setTimeout.
+        persistGatewayPayload(supabase, clientTxnId, paymentEntry).catch((err) => {
+          console.warn('[sabpaisa-createCollection] Supabase persist gave up:', err);
+        });
 
         console.log(
           '[sabpaisa-createCollection] payment_url=',

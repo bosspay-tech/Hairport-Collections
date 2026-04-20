@@ -11,15 +11,11 @@ COPY public/ public/
 COPY src/ src/
 COPY data.json ./
 
-# Vite env vars must be available at build time
+# Vite env vars must be available at build time.
+# ONLY add values that are safe to ship to the browser. SabPaisa creds
+# are NOT in this list — they stay server-side (see bridge/.env.example).
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_PUBLISHABLE_KEY
-ARG VITE_SABPAISA_CLIENT_CODE
-ARG VITE_SABPAISA_USERNAME
-ARG VITE_SABPAISA_PASSWORD
-ARG VITE_SABPAISA_AUTHENTICATION_KEY
-ARG VITE_SABPAISA_AUTHENTICATION_IV
-ARG VITE_SABPAISA_ENV
 
 RUN npm run build
 

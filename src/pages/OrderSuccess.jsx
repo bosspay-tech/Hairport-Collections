@@ -1,11 +1,16 @@
 import { Link, useLocation } from "react-router-dom";
-import { useEffect, useRef, useState } from "react";
-import { supabase } from "../lib/supabase";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useCartStore } from "../store/cart.store";
-import { parsePaymentResponse } from "sabpaisa-pg-dev";
 
-const authKey = import.meta.env.VITE_SABPAISA_AUTHENTICATION_KEY;
-const authIV = import.meta.env.VITE_SABPAISA_AUTHENTICATION_IV;
+// Payment verification happens on the bridge server; this page only needs to
+// read the status/txn/amount/message that the server already set on the
+// redirect query string after decrypting SabPaisa's callback. If the user
+// lands here without a terminal status (e.g. SabPaisa's browser-redirect
+// dropped `encResponse` or routed them back too fast), we short-poll the
+// server's on-demand status probe for ~20 s.
+
+const PROBE_INTERVAL_MS = 2_000;
+const PROBE_MAX_ATTEMPTS = 10;
 
 function formatMoney(value) {
   const num = Number(value || 0);
@@ -13,228 +18,76 @@ function formatMoney(value) {
   return `₹${num.toFixed(0)}`;
 }
 
-function normalizeObject(data) {
-  if (!data) return {};
-
-  if (typeof data === "object" && !Array.isArray(data)) {
-    return data;
-  }
-
-  if (typeof data === "string") {
-    try {
-      const parsed = JSON.parse(data);
-      return parsed && typeof parsed === "object" ? parsed : { raw: data };
-    } catch {
-      return { raw: data };
-    }
-  }
-
-  return { raw: String(data) };
-}
-
-function getValue(obj, keys = []) {
-  if (!obj || typeof obj !== "object") return "";
-
-  for (const key of keys) {
-    if (
-      obj[key] !== undefined &&
-      obj[key] !== null &&
-      String(obj[key]).trim() !== ""
-    ) {
-      return obj[key];
-    }
-
-    const matchedKey = Object.keys(obj).find(
-      (existingKey) => existingKey.toLowerCase() === key.toLowerCase(),
-    );
-
-    if (
-      matchedKey &&
-      obj[matchedKey] !== undefined &&
-      obj[matchedKey] !== null &&
-      String(obj[matchedKey]).trim() !== ""
-    ) {
-      return obj[matchedKey];
-    }
-  }
-
-  return "";
-}
-
-function resolvePaymentStatus(response) {
-  const statusValue = String(
-    getValue(response, [
-      "status",
-      "txnStatus",
-      "paymentStatus",
-      "spRespStatus",
-      "responseStatus",
-      "txn_status",
-      "payment_status",
-      "responseCode",
-      "spRespCode",
-    ]) || "",
-  ).toLowerCase();
-
-  const messageValue = String(
-    getValue(response, [
-      "message",
-      "statusMessage",
-      "responseMessage",
-      "spRespMessage",
-      "statusDesc",
-      "txnMessage",
-    ]) || "",
-  ).toLowerCase();
-
-  const combined = `${statusValue} ${messageValue}`;
-
-  const successChecks = [
-    "success",
-    "successful",
-    "succeeded",
-    "captured",
-    "completed",
-    "approved",
-    "paid",
-    "0300",
-  ];
-
-  const failedChecks = [
-    "fail",
-    "failed",
-    "failure",
-    "declined",
-    "cancelled",
-    "canceled",
-    "aborted",
-    "error",
-    "invalid",
-  ];
-
-  if (successChecks.some((word) => combined.includes(word))) {
-    return "success";
-  }
-
-  if (failedChecks.some((word) => combined.includes(word))) {
-    return "failed";
-  }
-
+function normalizeStatus(raw) {
+  const value = String(raw || "").toLowerCase().trim();
+  if (value === "success" || value === "failed") return value;
+  if (value === "pending" || value === "initiated") return "unknown";
   return "unknown";
 }
 
 export default function OrderSuccess() {
   const location = useLocation();
   const { clearCart } = useCartStore();
-  const handledRef = useRef(false);
+  const cartClearedRef = useRef(false);
 
-  const [responseEntries, setResponseEntries] = useState([]);
-  const [status, setStatus] = useState("processing");
-  const [txnId, setTxnId] = useState("");
-  const [amount, setAmount] = useState("");
-  const [message, setMessage] = useState("");
+  const query = useMemo(
+    () => new URLSearchParams(location.search),
+    [location.search],
+  );
 
-  const updateOrder = async (transactionId, orderStatus) => {
-    if (!transactionId) return;
-
-    const { error } = await supabase
-      .from("orders")
-      .update({ status: orderStatus })
-      .eq("transaction_id", transactionId);
-
-    if (error) {
-      throw new Error(error.message);
-    }
-  };
+  const [status, setStatus] = useState(() => normalizeStatus(query.get("status")));
+  const [txnId] = useState(() => query.get("txn") || query.get("clientTxnId") || "");
+  const [amount, setAmount] = useState(() => query.get("amount") || "");
+  const [message] = useState(() => query.get("message") || "");
 
   useEffect(() => {
-    if (handledRef.current) return;
-    handledRef.current = true;
+    if (status === "success" && !cartClearedRef.current) {
+      cartClearedRef.current = true;
+      clearCart();
+    }
+  }, [status, clearCart]);
 
-    const parseResponse = async () => {
+  useEffect(() => {
+    if (status !== "unknown" || !txnId) return;
+
+    let cancelled = false;
+    let attempt = 0;
+    let timer = null;
+
+    const probe = async () => {
+      if (cancelled) return;
+      attempt += 1;
       try {
-        const data = await parsePaymentResponse(authKey, authIV);
-        const parsed = normalizeObject(data);
-
-        setResponseEntries(Object.entries(parsed));
-
-        const query = new URLSearchParams(location.search);
-
-        const resolvedTxnId = String(
-          getValue(parsed, [
-            "clientTxnId",
-            "client_txn_id",
-            "clientTransactionId",
-            "txnId",
-            "txn_id",
-            "transId",
-            "transactionId",
-          ]) ||
-            query.get("clientTxnId") ||
-            query.get("txnId") ||
-            "",
+        const resp = await fetch(
+          `/api/hairport/status/${encodeURIComponent(txnId)}`,
+          { headers: { accept: "application/json" } },
         );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const body = await resp.json();
+        if (cancelled) return;
 
-        const resolvedAmount = String(
-          getValue(parsed, [
-            "amount",
-            "txnAmount",
-            "paidAmount",
-            "transAmount",
-          ]) ||
-            query.get("amount") ||
-            "",
-        );
-
-        const resolvedMessage = String(
-          getValue(parsed, [
-            "message",
-            "statusMessage",
-            "responseMessage",
-            "spRespMessage",
-            "statusDesc",
-            "txnMessage",
-          ]) || "",
-        );
-
-        const resolvedStatus = resolvePaymentStatus(parsed);
-
-        setTxnId(resolvedTxnId);
-        setAmount(resolvedAmount);
-        setMessage(resolvedMessage);
-
-        if (resolvedStatus === "success") {
-          await updateOrder(resolvedTxnId, "success");
-          clearCart();
-          setStatus("success");
+        const next = normalizeStatus(body?.status);
+        if (next === "success" || next === "failed") {
+          setStatus(next);
+          if (!amount && body?.amount) setAmount(String(body.amount));
           return;
         }
-
-        if (resolvedStatus === "failed") {
-          await updateOrder(resolvedTxnId, "failed");
-          setStatus("failed");
-          return;
+        if (attempt < PROBE_MAX_ATTEMPTS) {
+          timer = setTimeout(probe, PROBE_INTERVAL_MS);
         }
-
-        await updateOrder(resolvedTxnId, "pending");
-        setStatus("unknown");
-      } catch (error) {
-        console.error("Error parsing payment response:", error);
-        setMessage(error?.message || "Unable to verify payment response.");
-        setStatus("failed");
+      } catch {
+        if (!cancelled && attempt < PROBE_MAX_ATTEMPTS) {
+          timer = setTimeout(probe, PROBE_INTERVAL_MS);
+        }
       }
     };
 
-    parseResponse();
-  }, [clearCart, location.search]);
-
-  if (status === "processing") {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        Processing payment...
-      </div>
-    );
-  }
+    timer = setTimeout(probe, PROBE_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [status, txnId, amount]);
 
   const isSuccess = status === "success";
   const isUnknown = status === "unknown";
@@ -315,36 +168,12 @@ export default function OrderSuccess() {
               🔒 Secure payments
             </span>
           </div>
-
-          {responseEntries.length ? (
-            <details className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left">
-              <summary className="cursor-pointer text-sm font-semibold text-slate-900">
-                Payment response details
-              </summary>
-
-              <div className="mt-3 space-y-2 text-xs text-slate-600">
-                {responseEntries.map(([key, value]) => (
-                  <div
-                    key={key}
-                    className="flex items-start justify-between gap-3 border-b border-slate-200 pb-2"
-                  >
-                    <span className="font-medium text-slate-700">{key}</span>
-                    <span className="text-right break-all">
-                      {typeof value === "object"
-                        ? JSON.stringify(value)
-                        : String(value)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </details>
-          ) : null}
         </div>
 
         <p className="mt-4 text-center text-xs text-slate-500">
           Need help? Visit{" "}
           <Link
-            to="/help"
+            to="/contact"
             className="font-semibold text-slate-900 hover:underline"
           >
             Help Center
