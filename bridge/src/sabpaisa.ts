@@ -24,56 +24,94 @@ const SABPAISA_STATUS_URL =
 
 // ── Key normalisation ──────────────────────────────────────────────
 /**
- * SabPaisa provides authKey and authIV as plain strings from the dashboard
- * (typically 16-character raw strings for AES-128).
- * We also handle the case where they've been base64-encoded in env vars.
+ * Resolve the raw key bytes and the correct AES-CBC algorithm variant
+ * from whatever string the env var contains.
+ *
+ * SabPaisa dashboard can give keys as:
+ *   - Raw 16-char string  → AES-128-CBC (16-byte key)
+ *   - Raw 32-char string  → AES-256-CBC (32-byte key)
+ *   - Base64 of 16 bytes  → AES-128-CBC
+ *   - Base64 of 32 bytes  → AES-256-CBC  ← CURRENT COOLIFY KEYS
+ *
+ * Returns { keyBuf, algo } so the cipher uses the right variant automatically.
  */
-function normalizeKey(key: string, expectedBytes: number): Buffer {
-  // Try raw UTF-8 first — most common for SabPaisa dashboard keys
-  const utf8 = Buffer.from(key, 'utf8');
-  if (utf8.length === expectedBytes) return utf8;
+function resolveAesKey(keyStr: string): { keyBuf: Buffer; algo: 'aes-128-cbc' | 'aes-256-cbc' } {
+  const utf8 = Buffer.from(keyStr, 'utf8');
+  if (utf8.length === 16) return { keyBuf: utf8, algo: 'aes-128-cbc' };
+  if (utf8.length === 32) return { keyBuf: utf8, algo: 'aes-256-cbc' };
 
-  // Try base64 decode
-  const b64 = Buffer.from(key, 'base64');
-  if (b64.length === expectedBytes) return b64;
+  const b64 = Buffer.from(keyStr, 'base64');
+  if (b64.length === 16) return { keyBuf: b64, algo: 'aes-128-cbc' };
+  if (b64.length === 32) return { keyBuf: b64, algo: 'aes-256-cbc' };
 
-  // Fallback: zero-pad or truncate to expectedBytes
+  // Unexpected length — truncate/pad to 16 bytes (AES-128) using decoded bytes
+  const larger = b64.length > utf8.length ? b64 : utf8;
   console.warn(
-    `[sabpaisa] authKey/authIV length mismatch: expected ${expectedBytes} bytes, ` +
-    `got utf8=${utf8.length} / base64=${b64.length}. Padding/truncating.`,
+    `[sabpaisa] authKey unexpected size: utf8=${utf8.length} base64=${b64.length}. ` +
+    `Truncating/padding to 16 bytes.`,
   );
-  const buf = Buffer.alloc(expectedBytes, 0);
-  utf8.copy(buf, 0, 0, Math.min(utf8.length, expectedBytes));
+  const buf = Buffer.alloc(16, 0);
+  larger.copy(buf, 0, 0, Math.min(larger.length, 16));
+  return { keyBuf: buf, algo: 'aes-128-cbc' };
+}
+
+/**
+ * Resolve the AES-CBC IV (always 16 bytes).
+ *
+ * If the string decodes to more than 16 bytes (e.g. 48-byte HMAC key stored
+ * as authIV), take the first 16 bytes of the decoded value.
+ */
+function resolveAesIV(ivStr: string): Buffer {
+  const utf8 = Buffer.from(ivStr, 'utf8');
+  if (utf8.length === 16) return utf8;
+
+  const b64 = Buffer.from(ivStr, 'base64');
+  if (b64.length === 16) return b64;
+
+  // Take first 16 bytes of whichever representation is larger (decoded bytes)
+  const larger = b64.length > utf8.length ? b64 : utf8;
+  console.warn(
+    `[sabpaisa] authIV unexpected size: utf8=${utf8.length} base64=${b64.length}. ` +
+    `Using first 16 bytes.`,
+  );
+  const buf = Buffer.alloc(16, 0);
+  larger.copy(buf, 0, 0, Math.min(larger.length, 16));
   return buf;
 }
 
-// ── AES-128-CBC primitives ─────────────────────────────────────────
+// ── AES-CBC encrypt / decrypt (auto-selects 128 or 256) ───────────
 
-function cbc128Encrypt(key: string, iv: string, plaintext: string): string {
-  const k = normalizeKey(key, 16);
-  const i = normalizeKey(iv, 16);
-  const cipher = createCipheriv('aes-128-cbc', k, i);
+function cbcEncrypt(keyStr: string, ivStr: string, plaintext: string): string {
+  const { keyBuf, algo } = resolveAesKey(keyStr);
+  const ivBuf = resolveAesIV(ivStr);
+
+  console.log(`[sabpaisa-crypto] encrypt algo=${algo} keyLen=${keyBuf.length} ivLen=${ivBuf.length}`);
+
+  const cipher = createCipheriv(algo, keyBuf, ivBuf);
   const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  // SabPaisa docs say Base64 or Hex; we use HEX (uppercase) to match the
-  // browser SDK convention and avoid URL-encoding issues with Base64's +/=
   return enc.toString('hex').toUpperCase();
 }
 
-function cbc128Decrypt(key: string, iv: string, ciphertext: string): string {
-  const k = normalizeKey(key, 16);
-  const i = normalizeKey(iv, 16);
+function cbcDecrypt(keyStr: string, ivStr: string, ciphertext: string): string {
+  const { keyBuf, algo } = resolveAesKey(keyStr);
+  const ivBuf = resolveAesIV(ivStr);
 
-  // Accept both HEX and Base64 — SabPaisa may return either
+  console.log(`[sabpaisa-crypto] decrypt algo=${algo} keyLen=${keyBuf.length} ivLen=${ivBuf.length}`);
+
   const trimmed = ciphertext.trim().replace(/\s+/g, '');
   const isHex = /^[0-9a-fA-F]+$/.test(trimmed);
   const buf = isHex
     ? Buffer.from(trimmed, 'hex')
     : Buffer.from(trimmed, 'base64');
 
-  const decipher = createDecipheriv('aes-128-cbc', k, i);
+  const decipher = createDecipheriv(algo, keyBuf, ivBuf);
   const dec = Buffer.concat([decipher.update(buf), decipher.final()]);
   return dec.toString('utf8');
 }
+
+// Aliases kept for readability at call sites
+const cbc128Encrypt = cbcEncrypt;
+const cbc128Decrypt = cbcDecrypt;
 
 // ── Public API ─────────────────────────────────────────────────────
 
