@@ -4,57 +4,21 @@ import { supabase } from "../lib/supabase";
 import { useCartStore } from "../store/cart.store";
 import { STORE_ID } from "../config/store";
 import { useAuth } from "../features/auth/useAuth";
-import { submitPaymentForm } from "sabpaisa-pg-dev";
-const clientCode = import.meta.env.VITE_SABPAISA_CLIENT_CODE;
-const transUserName = import.meta.env.VITE_SABPAISA_USERNAME;
-const transUserPassword = import.meta.env.VITE_SABPAISA_PASSWORD;
-const authKey = import.meta.env.VITE_SABPAISA_AUTHENTICATION_KEY;
-const authIV = import.meta.env.VITE_SABPAISA_AUTHENTICATION_IV;
+
+// Payment init goes through the bridge server (server-side SabPaisa creds).
+// DO NOT import `sabpaisa-pg-dev` here — that shipped creds to every
+// visitor's browser. The backend now owns all SabPaisa interaction.
+
 function formatMoney(n) {
   const num = Number(n || 0);
   return `₹${num.toFixed(0)}`;
 }
-const generateTxnId = () => {
+
+function generateTxnId() {
   return "TXN_" + Date.now();
-};
-const defaultValues = {
-  clientCode: clientCode || "XXXXX",
-  transUserName: transUserName || "XXXXXX",
-  transUserPassword: transUserPassword || "XXXXXXXX",
-  authKey: authKey || "XXXXXXXXXXXXXXXXXXXXXXX",
-  authIV: authIV || "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-  payerName: "",
-  payerEmail: "",
-  payerMobile: "",
-  amount: 0,
-  amountType: "INR",
-  clientTxnId: "",
-  channelId: "npm",
-  udf1: null,
-  udf2: null,
-  udf3: null,
-  udf4: null,
-  udf5: null,
-  udf6: null,
-  udf7: null,
-  udf8: null,
-  udf9: null,
-  udf10: null,
-  udf11: null,
-  udf12: null,
-  udf13: null,
-  udf14: null,
-  udf15: null,
-  udf16: null,
-  udf17: null,
-  udf18: null,
-  udf19: null,
-  udf20: null,
-  env: import.meta.env.VITE_SABPAISA_ENV,
-  callbackUrl: `${window.location.origin}/order-success`,
-};
+}
+
 export default function Checkout() {
-  const [formState, setFormState] = useState(defaultValues);
   const [customer, setCustomer] = useState({
     name: "",
     email: "",
@@ -85,25 +49,10 @@ export default function Checkout() {
       state: user?.user_metadata?.state || prev.state,
       pincode: user?.user_metadata?.pincode || prev.pincode,
     }));
-    setFormState((prev) => ({
-      ...prev,
-      payerName: user?.user_metadata?.full_name || prev.payerName,
-      payerEmail: user?.email || prev.payerEmail,
-      payerMobile: user?.phone || prev.payerMobile,
-    }));
   }, [user]);
   const handleCustomerChange = (e) => {
     const { name, value } = e.target;
     setCustomer((prev) => ({ ...prev, [name]: value }));
-    if (name === "name") {
-      setFormState((prev) => ({ ...prev, payerName: value }));
-    }
-    if (name === "email") {
-      setFormState((prev) => ({ ...prev, payerEmail: value }));
-    }
-    if (name === "phone") {
-      setFormState((prev) => ({ ...prev, payerMobile: value }));
-    }
   };
   const validateForm = () => {
     if (!customer.name.trim()) return "Please enter full name.";
@@ -135,19 +84,28 @@ export default function Checkout() {
       setLoading(true);
       const txnId = generateTxnId();
       await createOrder(txnId);
-      const paymentData = {
-        ...formState,
-        payerName: customer.name,
-        payerEmail: customer.email,
-        payerMobile: customer.phone,
-        amount: subtotal,
-        clientTxnId: txnId,
-        udf1: customer.address,
-        udf2: customer.city,
-        udf3: customer.state,
-        udf4: customer.pincode,
-      };
-      submitPaymentForm(paymentData);
+
+      const resp = await fetch("/api/hairport/checkout", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          txnId,
+          amount: subtotal,
+          payerName: customer.name,
+          payerEmail: customer.email,
+          payerMobile: customer.phone,
+        }),
+      });
+
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body?.error || `Checkout init failed (HTTP ${resp.status})`);
+      }
+
+      const { payUrl } = await resp.json();
+      if (!payUrl) throw new Error("Checkout init returned no redirect URL.");
+
+      window.location.assign(payUrl);
     } catch (err) {
       setError(err.message || "Something went wrong.");
       setLoading(false);

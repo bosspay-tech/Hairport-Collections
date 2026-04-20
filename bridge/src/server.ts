@@ -10,10 +10,14 @@ import {
 import { createClient } from '@supabase/supabase-js';
 import { createSabPaisaHandlers, pendingPayments } from './handlers.js';
 import {
+  buildSabPaisaEncData,
   decryptSabPaisaResponse,
+  querySabPaisaStatus,
   resolveSabPaisaStatus,
+  validateSabPaisaConfig,
   type SabPaisaConfig,
 } from './sabpaisa.js';
+import { startSabPaisaReconciler } from './reconciler.js';
 
 // ── Environment ────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT ?? 3000);
@@ -29,9 +33,9 @@ const SABPAISA_USERNAME = process.env.SABPAISA_USERNAME;
 const SABPAISA_PASSWORD = process.env.SABPAISA_PASSWORD;
 const SABPAISA_AUTH_KEY = process.env.SABPAISA_AUTH_KEY;
 const SABPAISA_AUTH_IV = process.env.SABPAISA_AUTH_IV;
-const SABPAISA_ENV = process.env.SABPAISA_ENV ?? 'stag';
+const SABPAISA_ENV = process.env.SABPAISA_ENV ?? 'prod';
 
-// ── Validate required env vars ─────────────────────────────────────
+// ── Validate required env vars exist ───────────────────────────────
 const missing = (
   [
     ['BOSSPAY_BRIDGE_SECRET', BRIDGE_SECRET],
@@ -48,6 +52,17 @@ const missing = (
 
 if (missing.length) {
   console.error(`Missing required env vars: ${missing.join(', ')}`);
+  process.exit(1);
+}
+
+// ── Fail fast on bad SabPaisa key/IV ───────────────────────────────
+// Refuses to start the server if AUTH_KEY / AUTH_IV can't be resolved
+// to valid AES sizes (16/24/32 bytes for key, 16 bytes for IV).
+try {
+  validateSabPaisaConfig(SABPAISA_AUTH_KEY!, SABPAISA_AUTH_IV!);
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`[startup] SabPaisa config invalid — refusing to boot.\n${msg}`);
   process.exit(1);
 }
 
@@ -82,6 +97,23 @@ const bridge = createBossPayBridge({
   txnStore,
   version: '1.0.0',
 });
+
+// ── SabPaisa callback-miss reconciler ──────────────────────────────
+// SabPaisa's async callback is unreliable; poll the TxnEnquiry API for any
+// pending bridge transaction in the last 15 min and synthesise a webhook
+// when a terminal status is seen. Idempotent vs. the real callback path.
+const reconciler = startSabPaisaReconciler({
+  supabase: supabaseClient,
+  config: sabpaisaConfig,
+  bridge,
+  enabled: process.env.SABPAISA_RECONCILER_ENABLED !== '0',
+});
+
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(sig, () => {
+    void reconciler.stop().finally(() => process.exit(0));
+  });
+}
 
 // ── Express app ────────────────────────────────────────────────────
 const app = express();
@@ -165,12 +197,6 @@ function mergeRawCallbackInput(req: Request): Record<string, unknown> {
   return merged;
 }
 
-/**
- * Resolve the pg_transaction_id from a decoded SabPaisa callback payload.
- *
- * SabPaisa echoes back `clientTxnId` which is now the raw BossPay UUID
- * (no sp_ prefix). Fallback to routeTxnId from the URL parameter.
- */
 function getPgTxnIdFromSabPaisaPayload(
   parsed: Record<string, string>,
   routeTxnId?: string,
@@ -180,7 +206,7 @@ function getPgTxnIdFromSabPaisaPayload(
     parsed['client_txn_id'] ??
     parsed['txnId'] ??
     parsed['order_id'] ??
-    routeTxnId ??  // raw UUID from URL — no sp_ prefix (new deployments)
+    routeTxnId ??
     ''
   );
 }
@@ -256,10 +282,7 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
 
     let pgTxnId = getPgTxnIdFromSabPaisaPayload(parsed, routeTxnId);
 
-    // For the dynamic route, routeTxnId is the raw BossPay UUID.
-    // Validate that the decoded payload's clientTxnId matches the URL.
     if (routeTxnId) {
-      // Accept both bare UUID and legacy sp_UUID for backwards compat
       const expectedBare = routeTxnId;
       const actualBare = getBareTxnId(pgTxnId);
 
@@ -286,7 +309,6 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
       `status=${status} amountPaisa=${amountPaisa}`,
     );
 
-    // Read existing row to detect duplicates
     const { data: existing, error: existingError } = await supabaseClient
       .from('bosspay_txns')
       .select('payment_status, amount_paisa, callback_forwarded_at')
@@ -302,7 +324,6 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
       existing?.payment_status === status &&
       Number(existing?.amount_paisa ?? 0) === amountPaisa;
 
-    // Persist the callback payload
     await supabaseClient
       .from('bosspay_txns')
       .update({
@@ -334,7 +355,6 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
       return;
     }
 
-    // Forward the result to BossPay
     const callbackUrl = `${API_BASE}/callbacks/sabpaisa/${bareTxnId}`;
     console.log(`[sabpaisa-callback] forwarding via POST → ${callbackUrl}`);
 
@@ -421,8 +441,6 @@ app.get('/pay/:pgTxnId', async (req, res) => {
   const { pgTxnId } = req.params;
   let pending = pendingPayments.get(pgTxnId);
 
-  // Fallback: recover from Supabase when the in-memory Map was cleared
-  // (server restart, redeploy, etc.)
   if (!pending) {
     try {
       const { data } = await supabaseClient
@@ -444,7 +462,6 @@ app.get('/pay/:pgTxnId', async (req, res) => {
             ? gw['clientCode']
             : sabpaisaConfig.clientCode,
         };
-        // Restore to Map so subsequent refreshes don't hit Supabase again
         pendingPayments.set(pgTxnId, pending);
         setTimeout(() => pendingPayments.delete(pgTxnId), 30 * 60 * 1000);
         console.log(`[pay] restored from Supabase for ${pgTxnId}`);
@@ -513,6 +530,260 @@ app.post(
 );
 
 // ════════════════════════════════════════════════════════════════════
+// Hairport storefront routes
+//
+// The React frontend used to read VITE_SABPAISA_* env vars and call
+// `sabpaisa-pg-dev` directly from the browser, which leaked credentials
+// into every JS bundle shipped to customers. Those creds are now
+// server-only; the storefront posts order details here and we build the
+// encrypted init payload and the return-decrypt step server-side.
+// ════════════════════════════════════════════════════════════════════
+
+const NON_EMPTY_STRING_RE = /^[\w\s.@+\-:/,'()]{1,200}$/;
+
+function sanitizeStorefrontString(v: unknown, max = 200): string {
+  if (typeof v !== 'string') return '';
+  const t = v.trim();
+  return t.length > max ? t.slice(0, max) : t;
+}
+
+app.post(
+  '/api/hairport/checkout',
+  express.json({ limit: '64kb' }),
+  async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+
+      const txnId = sanitizeStorefrontString(body['txnId'], 80);
+      const amount = Number(body['amount'] ?? 0);
+      const payerName = sanitizeStorefrontString(body['payerName'], 80);
+      const payerEmail = sanitizeStorefrontString(body['payerEmail'], 120);
+      const payerMobile = sanitizeStorefrontString(body['payerMobile'], 20);
+
+      if (!txnId || !NON_EMPTY_STRING_RE.test(txnId)) {
+        res.status(400).json({ ok: false, error: 'Missing or invalid txnId' });
+        return;
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ ok: false, error: 'Invalid amount' });
+        return;
+      }
+      if (!payerName || !payerEmail || !payerMobile) {
+        res.status(400).json({ ok: false, error: 'Missing payer details' });
+        return;
+      }
+
+      const normalizedBase = stripTrailingSlash(BRIDGE_BASE_URL!);
+      const callbackUrl = `${normalizedBase}/api/hairport/callback/${encodeURIComponent(txnId)}`;
+
+      const { encData, formActionUrl } = buildSabPaisaEncData(sabpaisaConfig, {
+        clientTxnId: txnId,
+        amount,
+        payerName,
+        payerEmail,
+        payerMobile,
+        callbackUrl,
+      });
+
+      const entry = {
+        encData,
+        formActionUrl,
+        clientCode: sabpaisaConfig.clientCode,
+      };
+      pendingPayments.set(txnId, entry);
+      setTimeout(() => pendingPayments.delete(txnId), 30 * 60 * 1000);
+
+      console.log(
+        `[hairport-checkout] txnId=${txnId} amount=${amount} payerEmail=${payerEmail}`,
+      );
+
+      res.json({
+        ok: true,
+        payUrl: `/pay/${encodeURIComponent(txnId)}`,
+        txnId,
+      });
+    } catch (err) {
+      console.error('[hairport-checkout] error:', err);
+      res.status(500).json({ ok: false, error: 'Internal error' });
+    }
+  },
+);
+
+async function handleHairportCallback(req: Request, res: Response) {
+  try {
+    const routeTxnId = firstString(req.params['txnId']) ?? '';
+    const raw = mergeRawCallbackInput(req);
+    const encResponse = firstString(raw['encResponse']);
+
+    let parsed: Record<string, string>;
+    if (encResponse) {
+      try {
+        parsed = decryptSabPaisaResponse(sabpaisaConfig, encResponse);
+      } catch (err) {
+        console.error('[hairport-callback] decrypt failed:', err);
+        res.redirect(
+          302,
+          `/order-success?status=failed&message=${encodeURIComponent('Unable to verify payment response.')}`,
+        );
+        return;
+      }
+    } else {
+      parsed = stringifyRecord(raw);
+    }
+
+    const resolvedTxnId =
+      parsed['clientTxnId'] ||
+      parsed['client_txn_id'] ||
+      parsed['txnId'] ||
+      parsed['order_id'] ||
+      routeTxnId;
+
+    if (routeTxnId && resolvedTxnId && resolvedTxnId !== routeTxnId) {
+      console.warn(
+        `[hairport-callback] txn mismatch route=${routeTxnId} payload=${resolvedTxnId}`,
+      );
+    }
+
+    const txnId = resolvedTxnId || routeTxnId;
+    const status = resolveSabPaisaStatus(parsed);
+    const amountRupees = Number(
+      parsed['amount'] ?? parsed['paidAmount'] ?? parsed['txnAmount'] ?? 0,
+    );
+    const normalizedAmount = Number.isFinite(amountRupees) ? Math.max(0, amountRupees) : 0;
+    const message =
+      parsed['message'] ||
+      parsed['statusMessage'] ||
+      parsed['responseMessage'] ||
+      parsed['statusDesc'] ||
+      '';
+
+    console.log(
+      `[hairport-callback] txnId=${txnId} status=${status} amount=${normalizedAmount}`,
+    );
+
+    if (txnId) {
+      try {
+        const orderStatus =
+          status === 'success' ? 'success' : status === 'failed' ? 'failed' : 'pending';
+        const { error } = await supabaseClient
+          .from('orders')
+          .update({ status: orderStatus })
+          .eq('transaction_id', txnId);
+        if (error) {
+          console.warn('[hairport-callback] orders update failed:', error.message);
+        }
+      } catch (err) {
+        console.warn('[hairport-callback] orders update threw:', err);
+      }
+    }
+
+    const qs = new URLSearchParams();
+    if (txnId) qs.set('txn', txnId);
+    qs.set('status', status);
+    if (normalizedAmount > 0) qs.set('amount', String(normalizedAmount));
+    if (message) qs.set('message', message);
+
+    res.redirect(302, `/order-success?${qs.toString()}`);
+  } catch (err) {
+    console.error('[hairport-callback] error:', err);
+    res.status(500).send('Error processing payment callback.');
+  }
+}
+
+app.get('/api/hairport/callback/:txnId', handleHairportCallback);
+
+app.post(
+  '/api/hairport/callback/:txnId',
+  ...callbackBodyParsers,
+  handleHairportCallback,
+);
+
+// ── On-demand status probe for the /order-success page ───────────────
+// SabPaisa's browser-redirect to our callbackURL is not 100% reliable —
+// sometimes the customer lands on /order-success without `encResponse`
+// in the URL. In that case the frontend polls this endpoint, which:
+//   1. returns the current `orders.status` if already terminal, else
+//   2. hits SabPaisa's TxnEnquiry API live, updates the row, and returns.
+// The 15 s reconciler is still the long-tail safety net for txns where
+// the user never comes back at all; this endpoint covers the case where
+// they DO come back promptly.
+app.get('/api/hairport/status/:txnId', async (req, res) => {
+  try {
+    const txnId = String(req.params['txnId'] ?? '').trim();
+    if (!txnId) {
+      res.status(400).json({ ok: false, error: 'Missing txnId' });
+      return;
+    }
+
+    const { data: existing } = await supabaseClient
+      .from('orders')
+      .select('status, total, transaction_id')
+      .eq('transaction_id', txnId)
+      .maybeSingle();
+
+    const currentStatus = (existing?.['status'] as string | undefined) ?? 'pending';
+    if (currentStatus === 'success' || currentStatus === 'failed') {
+      res.json({
+        ok: true,
+        txnId,
+        status: currentStatus,
+        amount: Number(existing?.['total'] ?? 0) || 0,
+        source: 'orders_cache',
+      });
+      return;
+    }
+
+    let parsed: Record<string, string>;
+    try {
+      parsed = await querySabPaisaStatus(sabpaisaConfig, txnId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[hairport-status] ${txnId} live probe failed: ${msg}`);
+      res.json({
+        ok: true,
+        txnId,
+        status: 'pending',
+        amount: 0,
+        source: 'probe_error',
+        error: msg,
+      });
+      return;
+    }
+
+    const resolved = resolveSabPaisaStatus(parsed);
+    const amountRupees = Number(
+      parsed['amount'] ?? parsed['paidAmount'] ?? parsed['txnAmount'] ?? 0,
+    ) || 0;
+
+    if (resolved === 'success' || resolved === 'failed') {
+      try {
+        await supabaseClient
+          .from('orders')
+          .update({ status: resolved })
+          .eq('transaction_id', txnId);
+      } catch (err) {
+        console.warn('[hairport-status] orders update threw:', err);
+      }
+    }
+
+    console.log(
+      `[hairport-status] ${txnId} live probe → status=${resolved} amount=${amountRupees}`,
+    );
+
+    res.json({
+      ok: true,
+      txnId,
+      status: resolved,
+      amount: amountRupees,
+      source: 'live_probe',
+    });
+  } catch (err) {
+    console.error('[hairport-status] error:', err);
+    res.status(500).json({ ok: false, error: 'Internal error' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
 // STATIC FILES + SPA FALLBACK — comes LAST, after all API routes
 // ════════════════════════════════════════════════════════════════════
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -526,7 +797,8 @@ if (hasPublicDir) {
     if (
       req.path.includes('/bosspay/') ||
       req.path.startsWith('/pay/') ||
-      req.path.startsWith('/webhooks/')
+      req.path.startsWith('/webhooks/') ||
+      req.path.startsWith('/api/')
     ) {
       res.status(404).json({ error: 'Not found' });
       return;
