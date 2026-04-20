@@ -417,9 +417,42 @@ app.use((req, res, next) => {
 });
 
 // ── /pay/:pgTxnId — auto-submitting form that POSTs to SabPaisa ───
-app.get('/pay/:pgTxnId', (req, res) => {
+app.get('/pay/:pgTxnId', async (req, res) => {
   const { pgTxnId } = req.params;
-  const pending = pendingPayments.get(pgTxnId);
+  let pending = pendingPayments.get(pgTxnId);
+
+  // Fallback: recover from Supabase when the in-memory Map was cleared
+  // (server restart, redeploy, etc.)
+  if (!pending) {
+    try {
+      const { data } = await supabaseClient
+        .from('bosspay_txns')
+        .select('gateway_payload')
+        .eq('pg_transaction_id', pgTxnId)
+        .maybeSingle();
+
+      const gw = data?.gateway_payload as Record<string, unknown> | null;
+      if (
+        gw &&
+        typeof gw['encData'] === 'string' &&
+        typeof gw['formActionUrl'] === 'string'
+      ) {
+        pending = {
+          encData: gw['encData'] as string,
+          formActionUrl: gw['formActionUrl'] as string,
+          clientCode: typeof gw['clientCode'] === 'string'
+            ? gw['clientCode']
+            : sabpaisaConfig.clientCode,
+        };
+        // Restore to Map so subsequent refreshes don't hit Supabase again
+        pendingPayments.set(pgTxnId, pending);
+        setTimeout(() => pendingPayments.delete(pgTxnId), 30 * 60 * 1000);
+        console.log(`[pay] restored from Supabase for ${pgTxnId}`);
+      }
+    } catch (err) {
+      console.error('[pay] Supabase fallback error:', err);
+    }
+  }
 
   if (!pending) {
     res.status(404).send('Payment session expired or not found.');

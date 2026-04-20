@@ -64,14 +64,32 @@ export function createSabPaisaHandlers(
           callbackUrl,
         });
 
-        pendingPayments.set(clientTxnId, {
-          encData,
-          formActionUrl,
-          clientCode: config.clientCode,
-        });
+        const paymentEntry = { encData, formActionUrl, clientCode: config.clientCode };
+        pendingPayments.set(clientTxnId, paymentEntry);
 
         // Clean up after 30 minutes
         setTimeout(() => pendingPayments.delete(clientTxnId), 30 * 60 * 1000);
+
+        // Persist to Supabase so the /pay/:pgTxnId page survives server restarts.
+        // Delay 2 s to allow SupabaseTxnStore to create the row first.
+        setTimeout(async () => {
+          try {
+            const { error } = await supabase
+              .from('bosspay_txns')
+              .update({
+                gateway_payload: paymentEntry,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('pg_transaction_id', clientTxnId);
+            if (error) {
+              console.warn('[sabpaisa-createCollection] Supabase persist error:', error.message);
+            } else {
+              console.log('[sabpaisa-createCollection] Supabase persist ok:', clientTxnId);
+            }
+          } catch (err) {
+            console.warn('[sabpaisa-createCollection] Supabase persist threw:', err);
+          }
+        }, 2000);
 
         console.log(
           '[sabpaisa-createCollection] payment_url=',
