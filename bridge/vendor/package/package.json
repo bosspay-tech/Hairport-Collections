@@ -1,0 +1,83 @@
+{
+  "name": "@bosspay/bridge-node",
+  "version": "1.0.0",
+  "description": "BossPay bridge toolkit for Node.js / Supabase / Deno — lets lenders expose their existing PG integrations (SabPaisa, AirPay, …) to BossPay using the same HMAC contract as the WordPress plugin.",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./express": {
+      "types": "./dist/adapters/express.d.ts",
+      "import": "./dist/adapters/express.js",
+      "default": "./dist/adapters/express.js"
+    },
+    "./webFetch": {
+      "types": "./dist/adapters/webFetch.d.ts",
+      "import": "./dist/adapters/webFetch.js",
+      "default": "./dist/adapters/webFetch.js"
+    },
+    "./txnStore/memory": {
+      "types": "./dist/txnStore/memory.d.ts",
+      "import": "./dist/txnStore/memory.js",
+      "default": "./dist/txnStore/memory.js"
+    },
+    "./txnStore/supabase": {
+      "types": "./dist/txnStore/supabase.d.ts",
+      "import": "./dist/txnStore/supabase.js",
+      "default": "./dist/txnStore/supabase.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.0 || ^5.0.0",
+    "zod": "^3.23.0"
+  },
+  "peerDependenciesMeta": {
+    "@supabase/supabase-js": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.11.0",
+    "express": "^5.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "bosspay",
+    "payment-gateway",
+    "bridge",
+    "sabpaisa",
+    "airpay",
+    "hmac"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pack:tarball": "pnpm build && pnpm pack"
+  }
+}

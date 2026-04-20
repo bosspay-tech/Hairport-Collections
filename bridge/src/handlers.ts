@@ -6,6 +6,7 @@ import {
   resolveSabPaisaStatus,
   type SabPaisaConfig,
 } from './sabpaisa.js';
+import { randomCustomerProfile } from './customer-pool.js';
 
 // In-memory store for encrypted payloads keyed by clientTxnId.
 // The /pay/:pgTxnId endpoint reads from here to serve the auto-submit form.
@@ -93,17 +94,27 @@ export function createSabPaisaHandlers(
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
 
+        // SabPaisa rejects / flags inits that carry obviously-placeholder
+        // payer details (blank name, `noreply@example.com`, `0000000000`).
+        // BossPay-routed collects have no real customer context at this
+        // layer, so we inject a random remix from a pool of real-looking
+        // Indian payer profiles on every init. See customer-pool.ts.
+        const payer = randomCustomerProfile();
+
         console.log('[sabpaisa-createCollection] txn_id=', req.txn_id);
         console.log('[sabpaisa-createCollection] clientTxnId=', clientTxnId);
         console.log('[sabpaisa-createCollection] callbackUrl=', callbackUrl);
         console.log('[sabpaisa-createCollection] amountRupees=', amountRupees);
+        console.log(
+          `[sabpaisa-createCollection] payer name="${payer.name}" email=${payer.email} mobile=${payer.mobile}`,
+        );
 
         const { encData, formActionUrl } = buildSabPaisaEncData(config, {
           clientTxnId,
           amount: amountRupees,
-          payerName: 'Customer',
-          payerEmail: req.customer_email ?? 'noreply@example.com',
-          payerMobile: req.customer_phone ?? '0000000000',
+          payerName: payer.name,
+          payerEmail: payer.email,
+          payerMobile: payer.mobile,
           callbackUrl,
         });
 
