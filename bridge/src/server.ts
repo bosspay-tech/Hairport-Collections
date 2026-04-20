@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Request, type Response } from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -12,7 +12,6 @@ import { createSabPaisaHandlers, pendingPayments } from './handlers.js';
 import {
   decryptSabPaisaResponse,
   resolveSabPaisaStatus,
-  querySabPaisaStatus,
   type SabPaisaConfig,
 } from './sabpaisa.js';
 
@@ -69,7 +68,11 @@ const sabpaisaConfig: SabPaisaConfig = {
   env: SABPAISA_ENV,
 };
 
-const handlers = createSabPaisaHandlers(sabpaisaConfig, BRIDGE_BASE_URL!);
+const handlers = createSabPaisaHandlers(
+  sabpaisaConfig,
+  BRIDGE_BASE_URL!,
+  supabaseClient,
+);
 
 // ── BossPay Bridge ─────────────────────────────────────────────────
 const bridge = createBossPayBridge({
@@ -94,22 +97,322 @@ const bridgeHandler = toExpress({
   bridgeSecret: BRIDGE_SECRET!,
 });
 
+// ── Helpers ────────────────────────────────────────────────────────
+
+function firstString(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = firstString(item);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
+/**
+ * Strip the legacy `sp_` prefix that old deployments added to pg_transaction_id.
+ * New deployments use the raw BossPay UUID as clientTxnId directly.
+ */
+function getBareTxnId(pgTxnId: string): string {
+  return pgTxnId.startsWith('sp_') ? pgTxnId.slice(3) : pgTxnId;
+}
+
+function stringifyRecord(input: Record<string, unknown>): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    const str = firstString(value);
+    if (str !== undefined) {
+      output[key] = str;
+    }
+  }
+  return output;
+}
+
+function mergeRawCallbackInput(req: Request): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+
+  if (req.query && typeof req.query === 'object') {
+    Object.assign(merged, req.query as Record<string, unknown>);
+  }
+
+  if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
+    Object.assign(merged, req.body as Record<string, unknown>);
+  }
+
+  if (typeof req.body === 'string' && req.body.trim()) {
+    const rawBody = req.body.trim();
+    if (rawBody.includes('=')) {
+      const params = new URLSearchParams(rawBody);
+      for (const [key, value] of params.entries()) {
+        if (!(key in merged)) merged[key] = value;
+      }
+    } else if (!('encResponse' in merged)) {
+      merged['encResponse'] = rawBody;
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Resolve the pg_transaction_id from a decoded SabPaisa callback payload.
+ *
+ * SabPaisa echoes back `clientTxnId` which is now the raw BossPay UUID
+ * (no sp_ prefix). Fallback to routeTxnId from the URL parameter.
+ */
+function getPgTxnIdFromSabPaisaPayload(
+  parsed: Record<string, string>,
+  routeTxnId?: string,
+): string {
+  return (
+    parsed['clientTxnId'] ??
+    parsed['client_txn_id'] ??
+    parsed['txnId'] ??
+    parsed['order_id'] ??
+    routeTxnId ??  // raw UUID from URL — no sp_ prefix (new deployments)
+    ''
+  );
+}
+
+function getAmountPaisaFromSabPaisaPayload(parsed: Record<string, string>): number {
+  const amountRupees = Number(
+    parsed['amount'] ??
+    parsed['paidAmount'] ??
+    parsed['txnAmount'] ??
+    parsed['paid_amount'] ??
+    0,
+  );
+  if (!Number.isFinite(amountRupees)) return 0;
+  return Math.max(0, Math.round(amountRupees * 100));
+}
+
+function buildOrderSuccessRedirectUrl(args: {
+  bareTxnId: string;
+  status: 'success' | 'failed' | 'pending';
+  encResponse?: string;
+  callbackForwardFailed?: boolean;
+}): string {
+  const params = new URLSearchParams();
+  if (args.bareTxnId) params.set('txn', args.bareTxnId);
+  params.set('status', args.status);
+  if (args.encResponse) params.set('encResponse', args.encResponse);
+  if (args.callbackForwardFailed) params.set('callbackForwardFailed', '1');
+  return `/order-success?${params.toString()}`;
+}
+
+function respondAfterCallback(args: {
+  req: Request;
+  res: Response;
+  bareTxnId: string;
+  status: 'success' | 'failed' | 'pending';
+  encResponse?: string;
+  body: Record<string, unknown>;
+  callbackForwardFailed?: boolean;
+}) {
+  const redirectUrl = buildOrderSuccessRedirectUrl({
+    bareTxnId: args.bareTxnId,
+    status: args.status,
+    encResponse: args.encResponse,
+    callbackForwardFailed: args.callbackForwardFailed,
+  });
+
+  if (args.req.method === 'GET' || args.req.accepts('html')) {
+    args.res.redirect(302, redirectUrl);
+    return;
+  }
+  args.res.status(200).json(args.body);
+}
+
+// ── SabPaisa callback handler ──────────────────────────────────────
+async function handleSabPaisaCallback(req: Request, res: Response) {
+  try {
+    console.log(`[sabpaisa-callback] inbound ${req.method} ${req.originalUrl}`);
+
+    const routeTxnId = firstString(req.params['txnId']) ?? '';
+    const raw = mergeRawCallbackInput(req);
+    const encResponse = firstString(raw['encResponse']);
+
+    let parsed: Record<string, string>;
+    let payloadSource: 'encResponse' | 'plain';
+
+    if (encResponse) {
+      parsed = decryptSabPaisaResponse(sabpaisaConfig, encResponse);
+      payloadSource = 'encResponse';
+    } else {
+      parsed = stringifyRecord(raw);
+      payloadSource = 'plain';
+    }
+
+    let pgTxnId = getPgTxnIdFromSabPaisaPayload(parsed, routeTxnId);
+
+    // For the dynamic route, routeTxnId is the raw BossPay UUID.
+    // Validate that the decoded payload's clientTxnId matches the URL.
+    if (routeTxnId) {
+      // Accept both bare UUID and legacy sp_UUID for backwards compat
+      const expectedBare = routeTxnId;
+      const actualBare = getBareTxnId(pgTxnId);
+
+      if (pgTxnId && actualBare !== expectedBare) {
+        res.status(400).send(
+          `Callback txn mismatch. expected ${expectedBare}, got ${pgTxnId}.`,
+        );
+        return;
+      }
+      pgTxnId = pgTxnId || routeTxnId;
+    }
+
+    if (!pgTxnId) {
+      res.status(400).send('Missing pg transaction id in SabPaisa callback.');
+      return;
+    }
+
+    const bareTxnId = getBareTxnId(pgTxnId);
+    const status = resolveSabPaisaStatus(parsed);
+    const amountPaisa = getAmountPaisaFromSabPaisaPayload(parsed);
+
+    console.log(
+      `[sabpaisa-callback] parsed source=${payloadSource} pgTxnId=${pgTxnId} ` +
+      `status=${status} amountPaisa=${amountPaisa}`,
+    );
+
+    // Read existing row to detect duplicates
+    const { data: existing, error: existingError } = await supabaseClient
+      .from('bosspay_txns')
+      .select('payment_status, amount_paisa, callback_forwarded_at')
+      .eq('pg_transaction_id', pgTxnId)
+      .maybeSingle();
+
+    if (existingError) {
+      console.error('[sabpaisa-callback] failed to read existing txn row:', existingError);
+    }
+
+    const alreadyForwarded =
+      !!existing?.callback_forwarded_at &&
+      existing?.payment_status === status &&
+      Number(existing?.amount_paisa ?? 0) === amountPaisa;
+
+    // Persist the callback payload
+    await supabaseClient
+      .from('bosspay_txns')
+      .update({
+        payment_status: status,
+        amount_paisa: amountPaisa,
+        gateway_payload: { source: payloadSource, raw, parsed },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('pg_transaction_id', pgTxnId);
+
+    if (alreadyForwarded) {
+      console.log(`[sabpaisa-callback] duplicate callback ignored for ${pgTxnId}`);
+      respondAfterCallback({
+        req, res, bareTxnId, status, encResponse,
+        body: { ok: true, duplicate: true, pgTxnId, status },
+      });
+      return;
+    }
+
+    if (status === 'pending') {
+      console.warn(
+        `[sabpaisa-callback] ambiguous/pending callback for ${pgTxnId}; ` +
+        `not forwarding to BossPay yet`,
+      );
+      respondAfterCallback({
+        req, res, bareTxnId, status, encResponse,
+        body: { ok: true, forwarded: false, pgTxnId, status },
+      });
+      return;
+    }
+
+    // Forward the result to BossPay
+    const callbackUrl = `${API_BASE}/callbacks/sabpaisa/${bareTxnId}`;
+    console.log(`[sabpaisa-callback] forwarding via POST → ${callbackUrl}`);
+
+    const result = await bridge.forwardCallback({
+      pgType: 'sabpaisa',
+      pgTransactionId: pgTxnId,
+      payload: {
+        status,
+        pg_transaction_id: pgTxnId,
+        amount: amountPaisa,
+        metadata: parsed,
+      },
+    });
+
+    console.log(
+      `[sabpaisa-callback] BossPay response: HTTP ${result.status} ` +
+      `(attempts=${result.attempts}) body=${result.body}`,
+    );
+
+    await supabaseClient
+      .from('bosspay_txns')
+      .update({
+        callback_forward_http_status: result.status,
+        callback_forwarded_at:
+          result.status >= 200 && result.status < 300
+            ? new Date().toISOString()
+            : null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('pg_transaction_id', pgTxnId);
+
+    if (result.status < 200 || result.status >= 300) {
+      console.error(
+        `[sabpaisa-callback] BossPay callback failed for ${pgTxnId} ` +
+        `with HTTP ${result.status}`,
+      );
+      if (req.method === 'POST') {
+        res.status(502).json({ ok: false, pgTxnId, status, forwardStatus: result.status });
+        return;
+      }
+      respondAfterCallback({
+        req, res, bareTxnId, status, encResponse, callbackForwardFailed: true,
+        body: { ok: false, pgTxnId, status, forwardStatus: result.status },
+      });
+      return;
+    }
+
+    respondAfterCallback({
+      req, res, bareTxnId, status, encResponse,
+      body: { ok: true, forwarded: true, pgTxnId, status, forwardStatus: result.status },
+    });
+  } catch (err) {
+    console.error('[sabpaisa-callback] error:', err);
+    res.status(500).send('Error processing payment callback.');
+  }
+}
+
+const callbackBodyParsers = [
+  express.urlencoded({ extended: false }),
+  express.json({ limit: '1mb' }),
+  express.text({ type: '*/*' }),
+] as const;
+
 // ════════════════════════════════════════════════════════════════════
-// BULLETPROOF MIDDLEWARE: intercept ALL /bosspay/v1/ requests at the
-// top of the middleware chain. This runs BEFORE express.static or any
-// SPA catch-all, so bridge routes can NEVER be shadowed by HTML.
-//
-// EXCEPTION: /wp-json/bosspay/v1/callback/sabpaisa/* is handled by
-// our own route below — skip it here so it falls through correctly.
+// Intercept BossPay bridge routes early, but DO NOT swallow the
+// custom SabPaisa callback routes.
 // ════════════════════════════════════════════════════════════════════
 app.use((req, res, next) => {
-  if (
-    req.path.includes('/bosspay/v1/') &&
-    !req.path.includes('/bosspay/v1/callback/sabpaisa/')
-  ) {
+  const isSabPaisaCallback =
+    req.path.startsWith('/wp-json/bosspay/v1/callback/sabpaisa/');
+
+  if (isSabPaisaCallback) return next();
+
+  if (req.path.includes('/bosspay/v1/')) {
     console.log(`[bridge] ${req.method} ${req.path} → bridgeHandler`);
     return bridgeHandler(req, res, next);
   }
+
   next();
 });
 
@@ -155,119 +458,25 @@ app.get('/pay/:pgTxnId', (req, res) => {
   res.type('html').send(html);
 });
 
-// ── SabPaisa callback handler (shared logic) ─────────────────────
-// Handles both the legacy /webhooks/sabpaisa and the per-txn
-// /wp-json/bosspay/v1/callback/sabpaisa/:txnId routes.
-// SabPaisa may call back via GET (browser redirect) or POST (server notify).
-async function handleSabPaisaCallback(
-  req: express.Request,
-  res: express.Response,
-  pgTxnIdOverride?: string,
-) {
-  try {
-    // encResponse may arrive as a query-param (GET) or in the body (POST)
-    const encResponse =
-      (req.query['encResponse'] as string | undefined) ??
-      (req.body as Record<string, string> | undefined)?.['encResponse'];
-
-    let parsed: Record<string, string>;
-    let pgTxnId: string;
-    let amount: number;
-
-    if (encResponse) {
-      // Decrypt the encrypted response from SabPaisa
-      parsed = decryptSabPaisaResponse(sabpaisaConfig, encResponse);
-      pgTxnId =
-        pgTxnIdOverride ??
-        parsed['clientTxnId'] ??
-        parsed['client_txn_id'] ??
-        parsed['txnId'] ??
-        '';
-      amount = Number(parsed['amount'] ?? parsed['paidAmount'] ?? 0);
-    } else if (pgTxnIdOverride) {
-      // No encResponse — fall back to polling the status API directly
-      console.log(
-        `[sabpaisa-callback] no encResponse for ${pgTxnIdOverride}, ` +
-        `falling back to status API`,
-      );
-      parsed = await querySabPaisaStatus(sabpaisaConfig, pgTxnIdOverride);
-      pgTxnId = pgTxnIdOverride;
-      amount = Number(parsed['amount'] ?? parsed['paidAmount'] ?? 0);
-    } else {
-      res.status(400).send('Missing encResponse parameter.');
-      return;
-    }
-
-    const resolvedStatus = resolveSabPaisaStatus(parsed);
-    const bossPayStatus: 'success' | 'failed' =
-      resolvedStatus === 'success' ? 'success' : 'failed';
-
-    console.log(
-      `[sabpaisa-callback] pgTxnId=${pgTxnId} status=${resolvedStatus} ` +
-      `amount=${amount}`,
-    );
-
-    // Forward result to BossPay
-    try {
-      const result = await bridge.forwardCallback({
-        pgType: 'sabpaisa',
-        pgTransactionId: pgTxnId,
-        payload: {
-          status: bossPayStatus,
-          pg_transaction_id: pgTxnId,
-          amount: Math.round(amount * 100), // rupees → paisa
-          metadata: parsed,
-        },
-      });
-      console.log(
-        `[sabpaisa-callback] BossPay response: HTTP ${result.status} ` +
-        `(attempts=${result.attempts})`,
-      );
-      if (result.status === 404) {
-        console.error(
-          `[sabpaisa-callback] 404 from BossPay — pgTxnId=${pgTxnId} ` +
-          `may not be registered yet`,
-        );
-      }
-    } catch (fwdErr) {
-      console.error('[sabpaisa-callback] forwardCallback error:', fwdErr);
-    }
-
-    // For GET requests (browser redirects), send the user to the order-success page.
-    // For POST requests (server-to-server), just acknowledge.
-    if (req.method === 'GET') {
-      const qs = encResponse
-        ? `?encResponse=${encodeURIComponent(encResponse)}`
-        : `?txn_id=${pgTxnId}&status=${resolvedStatus}`;
-      res.redirect(302, `/order-success${qs}`);
-    } else {
-      res.json({ received: true });
-    }
-  } catch (err) {
-    console.error('[sabpaisa-callback] unhandled error:', err);
-    res.status(500).send('Error processing payment callback.');
-  }
-}
-
-// Legacy shared webhook URL (GET — browser redirect from SabPaisa)
-app.get('/webhooks/sabpaisa', (req, res) =>
-  handleSabPaisaCallback(req, res),
+// ── Per-transaction SabPaisa callback (client-requested route) ────
+app.get(
+  '/wp-json/bosspay/v1/callback/sabpaisa/:txnId',
+  handleSabPaisaCallback,
 );
 
-// Per-transaction callback URL — handles both POST (SabPaisa server notify)
-// and GET (browser redirect).  The bridge interceptor above explicitly
-// excludes /callback/sabpaisa/* so this route fires correctly.
-app.all(
+app.post(
   '/wp-json/bosspay/v1/callback/sabpaisa/:txnId',
-  express.json(),
-  express.urlencoded({ extended: false }),
-  (req, res) => {
-    const { txnId } = req.params;
-    console.log(
-      `[sabpaisa-callback] ${req.method} /wp-json/bosspay/v1/callback/sabpaisa/${txnId}`,
-    );
-    handleSabPaisaCallback(req, res, txnId);
-  },
+  ...callbackBodyParsers,
+  handleSabPaisaCallback,
+);
+
+// ── Legacy shared callback route (fallback for old in-flight txns) ─
+app.get('/webhooks/sabpaisa', handleSabPaisaCallback);
+
+app.post(
+  '/webhooks/sabpaisa',
+  ...callbackBodyParsers,
+  handleSabPaisaCallback,
 );
 
 // ════════════════════════════════════════════════════════════════════
@@ -280,11 +489,12 @@ const hasPublicDir = existsSync(publicDir);
 if (hasPublicDir) {
   app.use(express.static(publicDir));
 
-  // SPA fallback: unmatched GET → index.html for React Router
-  // Exclude API paths as extra safety (belt + suspenders)
   app.get('{*path}', (req, res) => {
-    // Double-check: never serve HTML for API paths
-    if (req.path.includes('/bosspay/') || req.path.startsWith('/pay/') || req.path.startsWith('/webhooks/')) {
+    if (
+      req.path.includes('/bosspay/') ||
+      req.path.startsWith('/pay/') ||
+      req.path.startsWith('/webhooks/')
+    ) {
       res.status(404).json({ error: 'Not found' });
       return;
     }
@@ -294,9 +504,15 @@ if (hasPublicDir) {
 
 // ── Start ──────────────────────────────────────────────────────────
 app.listen(PORT, () => {
+  const normalizedBridgeBaseUrl = stripTrailingSlash(BRIDGE_BASE_URL!);
+
   console.log(`hairport-bosspay-bridge listening on :${PORT}`);
-  console.log(`Bridge base URL: ${BRIDGE_BASE_URL}`);
+  console.log(`Bridge base URL: ${normalizedBridgeBaseUrl}`);
   console.log(`SabPaisa env: ${SABPAISA_ENV}`);
   if (hasPublicDir) console.log('Frontend: serving React SPA');
   console.log('Bridge routes: /wp-json/bosspay/v1/{health,collect,payout,status/:id}');
+  console.log(
+    'SabPaisa callback routes: ' +
+    '/wp-json/bosspay/v1/callback/sabpaisa/:txnId and /webhooks/sabpaisa',
+  );
 });

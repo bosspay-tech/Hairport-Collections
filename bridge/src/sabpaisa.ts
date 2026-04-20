@@ -222,7 +222,7 @@ export function decryptSabPaisaResponse(
   config: SabPaisaConfig,
   encResponse: string,
 ): Record<string, string> {
-  // Express URL-decodes '+' as space — restore it
+  // Express URL-decodes '+' as space — restore it before decryption
   const cleaned = encResponse.replace(/ /g, '+');
   console.log(
     `[sabpaisa-decrypt] len=${cleaned.length} sample=${cleaned.slice(0, 40)}`,

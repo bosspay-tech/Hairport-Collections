@@ -1,4 +1,5 @@
 import type { BridgeHandlers } from '@bosspay/bridge-node';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   buildSabPaisaEncData,
   querySabPaisaStatus,
@@ -13,31 +14,46 @@ export const pendingPayments = new Map<
   { encData: string; formActionUrl: string; clientCode: string }
 >();
 
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
 /**
  * Build the real SabPaisa handlers that the BossPay bridge will call.
  *
  * `bridgeBaseUrl` is the public HTTPS URL of this bridge server
  * (e.g. https://hairportcollections.com — no trailing slash).
+ *
+ * `supabase` is the service-role Supabase client, kept here for forward-compat
+ * (e.g. writing txn rows, reading fallback status).
  */
 export function createSabPaisaHandlers(
   config: SabPaisaConfig,
   bridgeBaseUrl: string,
+  supabase: SupabaseClient,
 ): BridgeHandlers {
+  const normalizedBridgeBaseUrl = stripTrailingSlash(bridgeBaseUrl);
+
   return {
     sabpaisa: {
       createCollection: async (req) => {
-        // Use BossPay's txn_id directly as clientTxnId.
-        // This keeps the IDs aligned: the callbackURL, the status API lookup,
-        // and BossPay's reconciliation all reference the same UUID.
+        // Use BossPay's txn_id directly as clientTxnId — no sp_ prefix.
+        // This keeps IDs aligned: callbackUrl, status API, and BossPay
+        // reconciliation all reference the same UUID.
         const clientTxnId = req.txn_id;
 
         // Unique callback URL per transaction so SabPaisa can POST back
         // to the correct BossPay callback route.
         const callbackUrl =
-          `${bridgeBaseUrl}/wp-json/bosspay/v1/callback/sabpaisa/${clientTxnId}`;
+          `${normalizedBridgeBaseUrl}/wp-json/bosspay/v1/callback/sabpaisa/${clientTxnId}`;
 
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
+
+        console.log('[sabpaisa-createCollection] txn_id=', req.txn_id);
+        console.log('[sabpaisa-createCollection] clientTxnId=', clientTxnId);
+        console.log('[sabpaisa-createCollection] callbackUrl=', callbackUrl);
+        console.log('[sabpaisa-createCollection] amountRupees=', amountRupees);
 
         const { encData, formActionUrl } = buildSabPaisaEncData(config, {
           clientTxnId,
@@ -48,12 +64,6 @@ export function createSabPaisaHandlers(
           callbackUrl,
         });
 
-        console.log(
-          `[collect] clientTxnId=${clientTxnId} amount=${amountRupees} ` +
-          `callbackUrl=${callbackUrl}`,
-        );
-
-        // Store for the /pay/:pgTxnId auto-submit page
         pendingPayments.set(clientTxnId, {
           encData,
           formActionUrl,
@@ -63,16 +73,21 @@ export function createSabPaisaHandlers(
         // Clean up after 30 minutes
         setTimeout(() => pendingPayments.delete(clientTxnId), 30 * 60 * 1000);
 
+        console.log(
+          '[sabpaisa-createCollection] payment_url=',
+          `${normalizedBridgeBaseUrl}/pay/${clientTxnId}`,
+        );
+
         return {
-          payment_url: `${bridgeBaseUrl}/pay/${clientTxnId}`,
+          payment_url: `${normalizedBridgeBaseUrl}/pay/${clientTxnId}`,
           pg_transaction_id: clientTxnId,
           mode: 'redirect' as const,
         };
       },
 
       checkStatus: async (req) => {
-        // pg_txn_id is the pg_transaction_id we returned from createCollection.
-        // Strip legacy sp_ prefix if present (from old deployments).
+        // Strip legacy sp_ prefix if present (from old deployments that used
+        // the prefix before this rewrite).
         const clientTxnId = req.pg_txn_id.replace(/^sp_/, '');
 
         console.log(
@@ -80,6 +95,8 @@ export function createSabPaisaHandlers(
         );
 
         try {
+          // Call SabPaisa status API directly — this is the client's preferred
+          // approach: poll the status API rather than relying on callbacks.
           const statusResp = await querySabPaisaStatus(config, clientTxnId);
           const resolvedStatus = resolveSabPaisaStatus(statusResp);
 
