@@ -224,18 +224,20 @@ export interface SabPaisaConfig {
 export interface SabPaisaPaymentParams {
   clientTxnId: string;
   amount: number;
-  /** First name only — must be non-empty, no leading/trailing whitespace. */
-  payerFirstName: string;
-  /** Last name — SabPaisa rejects the request when this is missing/null
-   *  with: "Payer name is not passed correctly in the payment request.
-   *  Please check.null". */
-  payerLastName: string;
+  /**
+   * Full payer name (e.g. "Asshad Ahmed"). SabPaisa's init payload expects
+   * a single `payerName` field — NOT split first/last. When null/empty,
+   * the init returns: "Payer name is not passed correctly in the payment
+   * request. Please check.null" (the trailing `null` is the literal
+   * string value of SabPaisa's server-side variable). The TxnEnquiry
+   * response echoes this same field name back, which is how we confirmed
+   * the spelling from production logs.
+   */
+  payerName: string;
   payerEmail: string;
   payerMobile: string;
   callbackUrl: string;
-  /** Optional billing address fields. Defaults to safe Indian values when
-   *  unset (SabPaisa's hosted page requires non-empty address+city+country
-   *  on the init payload). */
+  /** Optional billing fields. Filled with safe defaults when unset. */
   payerAddress?: string;
   payerCity?: string;
   payerState?: string;
@@ -274,11 +276,18 @@ export function buildSabPaisaEncData(
   params: SabPaisaPaymentParams,
 ): { encData: string; formActionUrl: string } {
   // SabPaisa's validator concatenates the failing field's value into its
-  // error message. The literal "Please check.null" we saw in production
-  // means it received `null` (or empty) for one of the payer fields.
-  // Coerce every required field to a non-empty sanitized string here.
-  const firstName = sanitizeNameForSabPaisa(params.payerFirstName, 'Customer');
-  const lastName = sanitizeNameForSabPaisa(params.payerLastName, 'Patron');
+  // error message (literally "Please check.null" = "Please check." + the
+  // string "null"). Coerce every required field to a non-empty sanitized
+  // string before we encrypt.
+  const fullName = sanitizeNameForSabPaisa(params.payerName, 'Customer Patron');
+  // Some SabPaisa deployments additionally look at split fields — send them
+  // alongside `payerName` as belt-and-braces. Neither on its own is enough:
+  // the WordPress WC plugin paths need split billing_first/last_name, the
+  // direct init REST uses `payerName`.
+  const spaceAt = fullName.indexOf(' ');
+  const firstName = spaceAt === -1 ? fullName : fullName.slice(0, spaceAt);
+  const lastName = spaceAt === -1 ? 'Patron' : fullName.slice(spaceAt + 1).trim() || 'Patron';
+
   const email = (params.payerEmail ?? '').trim() || 'noreply@example.com';
   const mobile = (params.payerMobile ?? '').trim() || '9000000000';
   const address = (params.payerAddress ?? '').trim() || 'NA';
@@ -294,6 +303,7 @@ export function buildSabPaisaEncData(
     clientTxnId: params.clientTxnId,
     amount: String(params.amount),
     amountType: 'INR',
+    payerName: fullName,
     payerFirstName: firstName,
     payerLastName: lastName,
     payerEmail: email,
