@@ -106,13 +106,14 @@ export function createSabPaisaHandlers(
         console.log('[sabpaisa-createCollection] callbackUrl=', callbackUrl);
         console.log('[sabpaisa-createCollection] amountRupees=', amountRupees);
         console.log(
-          `[sabpaisa-createCollection] payer name="${payer.name}" email=${payer.email} mobile=${payer.mobile}`,
+          `[sabpaisa-createCollection] payer first="${payer.firstName}" last="${payer.lastName}" email=${payer.email} mobile=${payer.mobile}`,
         );
 
         const { encData, formActionUrl } = buildSabPaisaEncData(config, {
           clientTxnId,
           amount: amountRupees,
-          payerName: payer.name,
+          payerFirstName: payer.firstName,
+          payerLastName: payer.lastName,
           payerEmail: payer.email,
           payerMobile: payer.mobile,
           callbackUrl,

@@ -52,18 +52,24 @@ function pick<T>(arr: readonly T[]): T {
 }
 
 export interface CustomerProfile {
-  name: string;
+  firstName: string;
+  lastName: string;
+  /** Convenience `${firstName} ${lastName}` for logging only — never pass
+   *  this combined string to SabPaisa's `payerFirstName` field. */
+  fullName: string;
   email: string;
   mobile: string;
 }
 
 export function randomCustomerProfile(): CustomerProfile {
-  const first = pick(POOL.names);
-  let last = pick(POOL.names);
+  const firstName = pick(POOL.names);
+  let lastName = pick(POOL.names);
   // Avoid `First First`: resample once if we picked the same name twice.
-  if (last === first && POOL.names.length > 1) last = pick(POOL.names);
+  if (lastName === firstName && POOL.names.length > 1) lastName = pick(POOL.names);
   return {
-    name: `${first} ${last}`,
+    firstName,
+    lastName,
+    fullName: `${firstName} ${lastName}`,
     email: pick(POOL.emails),
     mobile: pick(POOL.mobiles),
   };
