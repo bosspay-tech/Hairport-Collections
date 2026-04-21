@@ -99,6 +99,14 @@ This PR resolves all of the above.
   retries when the row isn't visible yet. If all retries miss, the 30-min
   in-memory `pendingPayments` Map still serves `/pay/:pgTxnId` and the
   reconciler will clean up.
+- **Inline thank-you at SabPaisa return URL (2026-04):** BossPay-routed
+  `callbackUrl` is now `/checkout/return/{uuid}` (neutral path) instead of
+  `/wp-json/bosspay/v1/callback/sabpaisa/...`. The handler returns **200 HTML**
+  at that URL (no 302 to `/order-success`), so the address bar never shows
+  `bosspay`. Legacy callback routes kept for in-flight transactions. Hairport
+  storefront callbacks (`/api/hairport/callback/...`) also render the same inline
+  thank-you pattern with cart clear + links to `/products` and `/orders`.
+
 - **`checkStatus` amount NaN (2026-04):** SabPaisa TxnEnquiry returns the
   literal string `"null"` for `amount` / `paidAmount` / `txnAmount` on
   unpaid txns. `Number("null")` → `NaN`, which then failed BossPay’s

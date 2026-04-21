@@ -223,18 +223,101 @@ function getAmountPaisaFromSabPaisaPayload(parsed: Record<string, string>): numb
   return Math.max(0, Math.round(amountRupees * 100));
 }
 
-function buildOrderSuccessRedirectUrl(args: {
-  bareTxnId: string;
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatInrFromPaisa(paisa: number): string {
+  const r = paisa / 100;
+  if (!Number.isFinite(r)) return '—';
+  return r % 1 === 0 ? `₹${r.toFixed(0)}` : `₹${r.toFixed(2)}`;
+}
+
+type ThankYouFlow = 'bosspay_routed' | 'hairport_native';
+
+/** Inline thank-you HTML at the callback URL (no redirect to /order-success). */
+function renderThankYouPage(args: {
   status: 'success' | 'failed' | 'pending';
-  encResponse?: string;
+  txnId: string;
+  amountPaisa: number;
+  message?: string;
+  flow: ThankYouFlow;
   callbackForwardFailed?: boolean;
 }): string {
-  const params = new URLSearchParams();
-  if (args.bareTxnId) params.set('txn', args.bareTxnId);
-  params.set('status', args.status);
-  if (args.encResponse) params.set('encResponse', args.encResponse);
-  if (args.callbackForwardFailed) params.set('callbackForwardFailed', '1');
-  return `/order-success?${params.toString()}`;
+  const { status, txnId, amountPaisa, message, flow, callbackForwardFailed } = args;
+  const icon = status === 'success' ? '✅' : status === 'pending' ? '⏳' : '❌';
+  const title =
+    status === 'success'
+      ? 'Payment successful'
+      : status === 'pending'
+        ? 'Payment status pending'
+        : 'Payment could not be completed';
+  const defaultSub =
+    status === 'success'
+      ? 'Your payment has been recorded.'
+      : status === 'pending'
+        ? 'We are confirming your payment. This may take a moment.'
+        : 'Something went wrong with your payment.';
+  const subtitleText =
+    status === 'failed' && message ? message : defaultSub;
+  const amountLine =
+    amountPaisa > 0
+      ? `<p class="muted">Amount: <strong>${escapeHtml(
+        formatInrFromPaisa(amountPaisa),
+      )}</strong></p>`
+      : '';
+  const txnLine = txnId
+    ? `<p class="muted small">Reference: <strong>${escapeHtml(txnId)}</strong></p>`
+    : '';
+  const forwardWarn = callbackForwardFailed
+    ? '<p class="warn">Your payment may have succeeded, but confirmation to the merchant may be delayed. If money was debited, keep this reference and contact support.</p>'
+    : '';
+
+  const navBlock =
+    flow === 'hairport_native'
+      ? `<div class="nav"><a class="btn" href="/products">Continue shopping</a><a class="btn secondary" href="/orders">View orders</a></div>${
+        status === 'success'
+          ? `<script>try{localStorage.removeItem('cart');}catch(e){}</script>`
+          : ''
+      }`
+      : '<p class="muted small">You can close this window and return to the merchant.</p>';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc;color:#0f172a;}
+.card{max-width:28rem;padding:2rem;border-radius:1rem;border:1px solid #e2e8f0;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.06);text-align:center;}
+h1{font-size:1.25rem;margin:0 0 .5rem;}
+p{margin:.5rem 0;}
+.muted{color:#64748b;font-size:.875rem;}
+.small{font-size:.75rem;}
+.warn{color:#b45309;font-size:.875rem;}
+.nav{display:flex;gap:.75rem;flex-wrap:wrap;justify-content:center;margin-top:1.25rem;}
+.btn{display:inline-block;padding:.6rem 1rem;border-radius:.75rem;background:#0f172a;color:#fff;text-decoration:none;font-weight:600;font-size:.875rem;}
+.btn.secondary{background:#fff;color:#0f172a;border:1px solid #e2e8f0;}
+.icon{font-size:2rem;margin-bottom:.75rem;}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="icon">${icon}</div>
+<h1>${escapeHtml(title)}</h1>
+<p class="muted">${escapeHtml(subtitleText)}</p>
+${forwardWarn}
+${amountLine}
+${txnLine}
+${navBlock}
+</div>
+</body>
+</html>`;
 }
 
 function respondAfterCallback(args: {
@@ -242,19 +325,22 @@ function respondAfterCallback(args: {
   res: Response;
   bareTxnId: string;
   status: 'success' | 'failed' | 'pending';
-  encResponse?: string;
+  amountPaisa: number;
+  message?: string;
+  flow: ThankYouFlow;
   body: Record<string, unknown>;
   callbackForwardFailed?: boolean;
-}) {
-  const redirectUrl = buildOrderSuccessRedirectUrl({
-    bareTxnId: args.bareTxnId,
-    status: args.status,
-    encResponse: args.encResponse,
-    callbackForwardFailed: args.callbackForwardFailed,
-  });
-
+}): void {
   if (args.req.method === 'GET' || args.req.accepts('html')) {
-    args.res.redirect(302, redirectUrl);
+    const html = renderThankYouPage({
+      status: args.status,
+      txnId: args.bareTxnId,
+      amountPaisa: args.amountPaisa,
+      message: args.message,
+      flow: args.flow,
+      callbackForwardFailed: args.callbackForwardFailed,
+    });
+    args.res.status(200).type('html').send(html);
     return;
   }
   args.res.status(200).json(args.body);
@@ -303,6 +389,12 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
     const bareTxnId = getBareTxnId(pgTxnId);
     const status = resolveSabPaisaStatus(parsed);
     const amountPaisa = getAmountPaisaFromSabPaisaPayload(parsed);
+    const humanMessage =
+      parsed['message'] ||
+      parsed['statusMessage'] ||
+      parsed['responseMessage'] ||
+      parsed['statusDesc'] ||
+      '';
 
     console.log(
       `[sabpaisa-callback] parsed source=${payloadSource} pgTxnId=${pgTxnId} ` +
@@ -337,7 +429,13 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
     if (alreadyForwarded) {
       console.log(`[sabpaisa-callback] duplicate callback ignored for ${pgTxnId}`);
       respondAfterCallback({
-        req, res, bareTxnId, status, encResponse,
+        req,
+        res,
+        bareTxnId,
+        status,
+        amountPaisa,
+        message: humanMessage,
+        flow: 'bosspay_routed',
         body: { ok: true, duplicate: true, pgTxnId, status },
       });
       return;
@@ -349,7 +447,13 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
         `not forwarding to BossPay yet`,
       );
       respondAfterCallback({
-        req, res, bareTxnId, status, encResponse,
+        req,
+        res,
+        bareTxnId,
+        status,
+        amountPaisa,
+        message: humanMessage,
+        flow: 'bosspay_routed',
         body: { ok: true, forwarded: false, pgTxnId, status },
       });
       return;
@@ -396,14 +500,27 @@ async function handleSabPaisaCallback(req: Request, res: Response) {
         return;
       }
       respondAfterCallback({
-        req, res, bareTxnId, status, encResponse, callbackForwardFailed: true,
+        req,
+        res,
+        bareTxnId,
+        status,
+        amountPaisa,
+        message: humanMessage,
+        flow: 'bosspay_routed',
+        callbackForwardFailed: true,
         body: { ok: false, pgTxnId, status, forwardStatus: result.status },
       });
       return;
     }
 
     respondAfterCallback({
-      req, res, bareTxnId, status, encResponse,
+      req,
+      res,
+      bareTxnId,
+      status,
+      amountPaisa,
+      message: humanMessage,
+      flow: 'bosspay_routed',
       body: { ok: true, forwarded: true, pgTxnId, status, forwardStatus: result.status },
     });
   } catch (err) {
@@ -424,7 +541,8 @@ const callbackBodyParsers = [
 // ════════════════════════════════════════════════════════════════════
 app.use((req, res, next) => {
   const isSabPaisaCallback =
-    req.path.startsWith('/wp-json/bosspay/v1/callback/sabpaisa/');
+    req.path.startsWith('/wp-json/bosspay/v1/callback/sabpaisa/') ||
+    req.path.startsWith('/checkout/return/');
 
   if (isSabPaisaCallback) return next();
 
@@ -508,7 +626,16 @@ app.get('/pay/:pgTxnId', async (req, res) => {
   res.type('html').send(html);
 });
 
-// ── Per-transaction SabPaisa callback (client-requested route) ────
+// ── SabPaisa browser return (neutral path; thank-you HTML inline) ─
+app.get('/checkout/return/:txnId', handleSabPaisaCallback);
+
+app.post(
+  '/checkout/return/:txnId',
+  ...callbackBodyParsers,
+  handleSabPaisaCallback,
+);
+
+// ── Legacy BossPay-shaped callback (in-flight txns before /checkout cutover) ─
 app.get(
   '/wp-json/bosspay/v1/callback/sabpaisa/:txnId',
   handleSabPaisaCallback,
@@ -621,10 +748,16 @@ async function handleHairportCallback(req: Request, res: Response) {
         parsed = decryptSabPaisaResponse(sabpaisaConfig, encResponse);
       } catch (err) {
         console.error('[hairport-callback] decrypt failed:', err);
-        res.redirect(
-          302,
-          `/order-success?status=failed&message=${encodeURIComponent('Unable to verify payment response.')}`,
-        );
+        respondAfterCallback({
+          req,
+          res,
+          bareTxnId: routeTxnId || 'unknown',
+          status: 'failed',
+          amountPaisa: 0,
+          message: 'Unable to verify payment response.',
+          flow: 'hairport_native',
+          body: { ok: false, error: 'decrypt_failed' },
+        });
         return;
       }
     } else {
@@ -650,6 +783,7 @@ async function handleHairportCallback(req: Request, res: Response) {
       parsed['amount'] ?? parsed['paidAmount'] ?? parsed['txnAmount'] ?? 0,
     );
     const normalizedAmount = Number.isFinite(amountRupees) ? Math.max(0, amountRupees) : 0;
+    const amountPaisaHairport = Math.round(normalizedAmount * 100);
     const message =
       parsed['message'] ||
       parsed['statusMessage'] ||
@@ -677,13 +811,22 @@ async function handleHairportCallback(req: Request, res: Response) {
       }
     }
 
-    const qs = new URLSearchParams();
-    if (txnId) qs.set('txn', txnId);
-    qs.set('status', status);
-    if (normalizedAmount > 0) qs.set('amount', String(normalizedAmount));
-    if (message) qs.set('message', message);
-
-    res.redirect(302, `/order-success?${qs.toString()}`);
+    const bareTxnId = txnId ? getBareTxnId(txnId) : routeTxnId || '';
+    respondAfterCallback({
+      req,
+      res,
+      bareTxnId,
+      status,
+      amountPaisa: amountPaisaHairport,
+      message,
+      flow: 'hairport_native',
+      body: {
+        ok: true,
+        txnId,
+        status,
+        amount_paisa: amountPaisaHairport,
+      },
+    });
   } catch (err) {
     console.error('[hairport-callback] error:', err);
     res.status(500).send('Error processing payment callback.');
@@ -798,7 +941,8 @@ if (hasPublicDir) {
       req.path.includes('/bosspay/') ||
       req.path.startsWith('/pay/') ||
       req.path.startsWith('/webhooks/') ||
-      req.path.startsWith('/api/')
+      req.path.startsWith('/api/') ||
+      req.path.startsWith('/checkout/return')
     ) {
       res.status(404).json({ error: 'Not found' });
       return;
@@ -817,7 +961,7 @@ app.listen(PORT, () => {
   if (hasPublicDir) console.log('Frontend: serving React SPA');
   console.log('Bridge routes: /wp-json/bosspay/v1/{health,collect,payout,status/:id}');
   console.log(
-    'SabPaisa callback routes: ' +
-    '/wp-json/bosspay/v1/callback/sabpaisa/:txnId and /webhooks/sabpaisa',
+    'SabPaisa callback routes: /checkout/return/:txnId (preferred); ' +
+    'legacy /wp-json/bosspay/v1/callback/sabpaisa/:txnId; /webhooks/sabpaisa',
   );
 });

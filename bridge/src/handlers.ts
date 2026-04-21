@@ -87,10 +87,10 @@ export function createSabPaisaHandlers(
         // reconciliation all reference the same UUID.
         const clientTxnId = req.txn_id;
 
-        // Unique callback URL per transaction so SabPaisa can POST back
-        // to the correct BossPay callback route.
+        // Customer-visible return URL (no wp-json/bosspay path). SabPaisa POSTs here
+        // after payment; we forward to BossPay server-side and render a thank-you page.
         const callbackUrl =
-          `${normalizedBridgeBaseUrl}/wp-json/bosspay/v1/callback/sabpaisa/${clientTxnId}`;
+          `${normalizedBridgeBaseUrl}/checkout/return/${clientTxnId}`;
 
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
