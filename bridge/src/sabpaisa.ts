@@ -224,10 +224,23 @@ export interface SabPaisaConfig {
 export interface SabPaisaPaymentParams {
   clientTxnId: string;
   amount: number;
-  payerName: string;
+  /** First name only — must be non-empty, no leading/trailing whitespace. */
+  payerFirstName: string;
+  /** Last name — SabPaisa rejects the request when this is missing/null
+   *  with: "Payer name is not passed correctly in the payment request.
+   *  Please check.null". */
+  payerLastName: string;
   payerEmail: string;
   payerMobile: string;
   callbackUrl: string;
+  /** Optional billing address fields. Defaults to safe Indian values when
+   *  unset (SabPaisa's hosted page requires non-empty address+city+country
+   *  on the init payload). */
+  payerAddress?: string;
+  payerCity?: string;
+  payerState?: string;
+  payerCountry?: string;
+  payerPincode?: string;
 }
 
 function statusUrlFor(_env: string): string {
@@ -243,26 +256,76 @@ function formUrlFor(_env: string): string {
  * form action URL. Customer's browser POSTs to `formActionUrl` with
  * `{ encData, clientCode }` to land on the hosted payment page.
  */
+/** Strip anything outside basic Latin letters / spaces / common punctuation
+ *  (SabPaisa's regex is conservative; non-ASCII names get rejected with the
+ *  same generic "Payer name is not passed correctly" error). */
+function sanitizeNameForSabPaisa(raw: string, fallback: string): string {
+  const cleaned = (raw ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z .'\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || fallback;
+}
+
 export function buildSabPaisaEncData(
   config: SabPaisaConfig,
   params: SabPaisaPaymentParams,
 ): { encData: string; formActionUrl: string } {
+  // SabPaisa's validator concatenates the failing field's value into its
+  // error message. The literal "Please check.null" we saw in production
+  // means it received `null` (or empty) for one of the payer fields.
+  // Coerce every required field to a non-empty sanitized string here.
+  const firstName = sanitizeNameForSabPaisa(params.payerFirstName, 'Customer');
+  const lastName = sanitizeNameForSabPaisa(params.payerLastName, 'Patron');
+  const email = (params.payerEmail ?? '').trim() || 'noreply@example.com';
+  const mobile = (params.payerMobile ?? '').trim() || '9000000000';
+  const address = (params.payerAddress ?? '').trim() || 'NA';
+  const city = (params.payerCity ?? '').trim() || 'Kolkata';
+  const state = (params.payerState ?? '').trim() || 'WB';
+  const country = (params.payerCountry ?? '').trim() || 'IN';
+  const pincode = (params.payerPincode ?? '').trim() || '700001';
+
   const qs = new URLSearchParams({
     clientCode: config.clientCode,
     transUserName: config.transUserName,
     transUserPassword: config.transUserPassword,
     clientTxnId: params.clientTxnId,
     amount: String(params.amount),
-    payerFirstName: params.payerName,
-    payerEmail: params.payerEmail,
-    payerContact: params.payerMobile,
+    amountType: 'INR',
+    payerFirstName: firstName,
+    payerLastName: lastName,
+    payerEmail: email,
+    payerMobile: mobile,
+    payerContact: mobile,
+    payerAddress: address,
+    payerCity: city,
+    payerState: state,
+    payerCountry: country,
+    payerPincode: pincode,
     callbackURL: params.callbackUrl,
-    channelId: 'npm',
+    channelId: 'WEB',
     udf1: '',
     udf2: '',
     udf3: '',
     udf4: '',
     udf5: '',
+    udf6: '',
+    udf7: '',
+    udf8: '',
+    udf9: '',
+    udf10: '',
+    udf11: '',
+    udf12: '',
+    udf13: '',
+    udf14: '',
+    udf15: '',
+    udf16: '',
+    udf17: '',
+    udf18: '',
+    udf19: '',
+    udf20: '',
   });
 
   const encData = encryptSabPaisa(qs.toString(), config.authKey, config.authIV);

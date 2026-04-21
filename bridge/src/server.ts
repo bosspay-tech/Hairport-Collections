@@ -576,10 +576,19 @@ app.post(
       const normalizedBase = stripTrailingSlash(BRIDGE_BASE_URL!);
       const callbackUrl = `${normalizedBase}/api/hairport/callback/${encodeURIComponent(txnId)}`;
 
+      // Storefront form gives a single "Full Name" string; SabPaisa
+      // requires `payerFirstName` AND `payerLastName` separately and
+      // rejects the request otherwise (literal error: "Payer name is
+      // not passed correctly in the payment request. Please check.null").
+      const nameParts = payerName.split(/\s+/).filter((p) => p.length > 0);
+      const firstName = nameParts.shift() ?? 'Customer';
+      const lastName = nameParts.length > 0 ? nameParts.join(' ') : 'Patron';
+
       const { encData, formActionUrl } = buildSabPaisaEncData(sabpaisaConfig, {
         clientTxnId: txnId,
         amount,
-        payerName,
+        payerFirstName: firstName,
+        payerLastName: lastName,
         payerEmail,
         payerMobile,
         callbackUrl,
