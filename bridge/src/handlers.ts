@@ -2,6 +2,7 @@ import type { BridgeHandlers } from '@bosspay/bridge-node';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   buildSabPaisaEncData,
+  coerceNullLiteral,
   querySabPaisaStatus,
   resolveSabPaisaStatus,
   type SabPaisaConfig,
@@ -161,13 +162,16 @@ export function createSabPaisaHandlers(
           const statusResp = await querySabPaisaStatus(config, clientTxnId);
           const resolvedStatus = resolveSabPaisaStatus(statusResp);
 
-          const amountRupees = Number(
-            statusResp['amount'] ??
-            statusResp['paidAmount'] ??
-            statusResp['txnAmount'] ??
-            0,
-          );
-          const amountPaisa = Math.round(amountRupees * 100);
+          const rawAmount =
+            coerceNullLiteral(statusResp['amount']) ||
+            coerceNullLiteral(statusResp['paidAmount']) ||
+            coerceNullLiteral(statusResp['txnAmount']) ||
+            '0';
+          const amountRupees = Number.parseFloat(rawAmount);
+          const amountPaisa =
+            Number.isFinite(amountRupees) && amountRupees >= 0
+              ? Math.round(amountRupees * 100)
+              : 0;
 
           console.log(
             `[checkStatus] via status API → clientTxnId=${clientTxnId} ` +
@@ -227,7 +231,11 @@ export function createSabPaisaHandlers(
               ? data.payment_status
               : 'pending';
 
-          const cachedAmount = Number(data?.amount_paisa ?? 0);
+          const cachedAmountRaw = Number(data?.amount_paisa ?? 0);
+          const cachedAmount =
+            Number.isFinite(cachedAmountRaw) && cachedAmountRaw >= 0
+              ? Math.round(cachedAmountRaw)
+              : 0;
 
           console.log(
             `[checkStatus] via cache → clientTxnId=${clientTxnId} ` +

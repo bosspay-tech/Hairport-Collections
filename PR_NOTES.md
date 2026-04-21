@@ -99,6 +99,14 @@ This PR resolves all of the above.
   retries when the row isn't visible yet. If all retries miss, the 30-min
   in-memory `pendingPayments` Map still serves `/pay/:pgTxnId` and the
   reconciler will clean up.
+- **`checkStatus` amount NaN (2026-04):** SabPaisa TxnEnquiry returns the
+  literal string `"null"` for `amount` / `paidAmount` / `txnAmount` on
+  unpaid txns. `Number("null")` → `NaN`, which then failed BossPay’s
+  `z.number().int().nonnegative()` on the bridge response. `checkStatus`
+  now runs those fields through `coerceNullLiteral` (same as
+  `sabpaisa.ts` / WP), parses with `parseFloat`, and falls back to
+  **0 paisa** when not finite; `amount_paisa` from Supabase is also
+  NaN-guarded on the cache fallback path.
 
 ### Frontend credential leak removal
 
