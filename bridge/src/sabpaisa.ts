@@ -271,6 +271,45 @@ function sanitizeNameForSabPaisa(raw: string, fallback: string): string {
   return cleaned || fallback;
 }
 
+/** Fail fast before encrypt so Coolify logs show which field is wrong instead
+ *  of SabPaisa's generic "X is mandatory. Please check.." */
+function assertRequiredSabPaisaInitPayload(fields: {
+  clientCode: string;
+  transUserName: string;
+  transUserPassword: string;
+  clientTxnId: string;
+  amount: string;
+  amountType: string;
+  payerName: string;
+  payerEmail: string;
+  payerMobile: string;
+  callbackUrl: string;
+}): void {
+  const missing: string[] = [];
+  const empty = (v: string) => (v ?? '').trim() === '';
+
+  if (empty(fields.clientCode)) missing.push('clientCode');
+  if (empty(fields.transUserName)) missing.push('transUserName');
+  if (empty(fields.transUserPassword)) missing.push('transUserPassword');
+  if (empty(fields.clientTxnId)) missing.push('clientTxnId');
+  if (empty(fields.amountType)) missing.push('amountType');
+  if (empty(fields.payerName)) missing.push('payerName');
+  if (empty(fields.payerEmail)) missing.push('payerEmail');
+  if (empty(fields.payerMobile)) missing.push('payerMobile');
+  if (empty(fields.callbackUrl)) missing.push('callbackUrl');
+
+  const amt = parseFloat(fields.amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    missing.push('amount (must be a number > 0)');
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `[sabpaisa] Missing or invalid SabPaisa init fields: ${missing.join(', ')}`,
+    );
+  }
+}
+
 export function buildSabPaisaEncData(
   config: SabPaisaConfig,
   params: SabPaisaPaymentParams,
@@ -296,12 +335,28 @@ export function buildSabPaisaEncData(
   const country = (params.payerCountry ?? '').trim() || 'IN';
   const pincode = (params.payerPincode ?? '').trim() || '700001';
 
+  const amountStr = String(params.amount);
+  const callbackUrl = (params.callbackUrl ?? '').trim();
+
+  assertRequiredSabPaisaInitPayload({
+    clientCode: config.clientCode,
+    transUserName: config.transUserName,
+    transUserPassword: config.transUserPassword,
+    clientTxnId: params.clientTxnId,
+    amount: amountStr,
+    amountType: 'INR',
+    payerName: fullName,
+    payerEmail: email,
+    payerMobile: mobile,
+    callbackUrl,
+  });
+
   const qs = new URLSearchParams({
     clientCode: config.clientCode,
     transUserName: config.transUserName,
     transUserPassword: config.transUserPassword,
     clientTxnId: params.clientTxnId,
-    amount: String(params.amount),
+    amount: amountStr,
     amountType: 'INR',
     payerName: fullName,
     payerFirstName: firstName,
@@ -314,7 +369,7 @@ export function buildSabPaisaEncData(
     payerState: state,
     payerCountry: country,
     payerPincode: pincode,
-    callbackURL: params.callbackUrl,
+    callbackUrl,
     channelId: 'WEB',
     udf1: '',
     udf2: '',
