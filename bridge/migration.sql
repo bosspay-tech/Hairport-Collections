@@ -36,3 +36,21 @@ alter table public.bosspay_txns
 --   AND created_at BETWEEN (now() - 15m) AND (now() - 10s)
 create index if not exists bosspay_txns_reconcile_idx
   on public.bosspay_txns (pg_type, callback_forwarded_at, created_at);
+
+-- ── UPI-intent direct-mint cache columns ────────────────────────────
+-- Added for @bosspay/bridge-node 1.1.0. The `SupabaseTxnStore.setUpiIntent`
+-- writes the cached `upi_qr_value` + `intent_tr` into `upi_intent` (as JSONB)
+-- and the mint timestamp into `upi_minted_at` (epoch seconds). The bridge's
+-- `handleUpiIntent` reads these back on every `/bosspay/v1/upi/:txnId` visit
+-- and re-mints only when the cache is older than 10 minutes. The original
+-- mint payload (encData / endpoint JSON / etc.) is also stored in the same
+-- `upi_intent` JSONB under `inputs`, so a pod restart doesn't force a re-mint.
+alter table public.bosspay_txns
+  add column if not exists upi_intent     jsonb,
+  add column if not exists upi_minted_at  bigint;
+
+-- Partial index so cache-hit lookups on `/bosspay/v1/upi/:txnId` visits skip
+-- the historical majority of rows that never opted into the UPI-intent path.
+create index if not exists bosspay_txns_upi_minted_at_idx
+  on public.bosspay_txns (upi_minted_at)
+  where upi_minted_at is not null and upi_minted_at > 0;

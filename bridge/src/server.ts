@@ -626,6 +626,133 @@ app.get('/pay/:pgTxnId', async (req, res) => {
   res.type('html').send(html);
 });
 
+// ── /upi/:pgTxnId — experimental UPI-intent landing (B2 flow) ─────
+// The customer opens this HTTPS URL (returned to the merchant as `upi_intent` on
+// /collect). We render a minimal page that:
+//   1. POSTs the SabPaisa `encData` form into a hidden iframe — this is the *same*
+//      handshake the hosted checkout performs, so SabPaisa registers the txn
+//      against `clientTxnId` and reconciliation (callback + TxnEnquiry polling)
+//      continues to work exactly as for `/pay/:pgTxnId`.
+//   2. After a short delay, redirects the top frame to `upi://pay?...` with
+//      `tr=<clientTxnId>`. On mobile, this triggers the native UPI app chooser.
+// Consumes the pending entry once (same cleanup contract as /pay). If the entry
+// is absent, falls back to Supabase for post-restart recovery; if both miss, we
+// respond 404 rather than emit a half-formed intent.
+app.get('/upi/:pgTxnId', async (req, res) => {
+  const { pgTxnId } = req.params;
+  let pending = pendingPayments.get(pgTxnId);
+
+  if (!pending) {
+    try {
+      const { data } = await supabaseClient
+        .from('bosspay_txns')
+        .select('gateway_payload')
+        .eq('pg_transaction_id', pgTxnId)
+        .maybeSingle();
+
+      const gw = data?.gateway_payload as Record<string, unknown> | null;
+      if (
+        gw &&
+        typeof gw['encData'] === 'string' &&
+        typeof gw['formActionUrl'] === 'string'
+      ) {
+        const upiIntentRaw = gw['upiIntent'] as Record<string, unknown> | undefined;
+        const upiIntent =
+          upiIntentRaw &&
+          typeof upiIntentRaw['vpa'] === 'string' &&
+          typeof upiIntentRaw['payeeName'] === 'string' &&
+          typeof upiIntentRaw['orderId'] === 'string' &&
+          typeof upiIntentRaw['amountRupees'] === 'number'
+            ? {
+                vpa: upiIntentRaw['vpa'] as string,
+                payeeName: upiIntentRaw['payeeName'] as string,
+                orderId: upiIntentRaw['orderId'] as string,
+                amountRupees: upiIntentRaw['amountRupees'] as number,
+              }
+            : undefined;
+
+        pending = {
+          encData: gw['encData'] as string,
+          formActionUrl: gw['formActionUrl'] as string,
+          clientCode:
+            typeof gw['clientCode'] === 'string'
+              ? (gw['clientCode'] as string)
+              : sabpaisaConfig.clientCode,
+          ...(upiIntent ? { upiIntent } : {}),
+        };
+        pendingPayments.set(pgTxnId, pending);
+        setTimeout(() => pendingPayments.delete(pgTxnId), 30 * 60 * 1000);
+        console.log(`[upi] restored from Supabase for ${pgTxnId}`);
+      }
+    } catch (err) {
+      console.error('[upi] Supabase fallback error:', err);
+    }
+  }
+
+  if (!pending || !pending.upiIntent) {
+    res.status(404).send('Payment session expired or UPI intent not configured.');
+    return;
+  }
+
+  const intent = pending.upiIntent;
+  const amountStr = intent.amountRupees.toFixed(2);
+  const upiDeeplink =
+    'upi://pay?' +
+    new URLSearchParams({
+      pa: intent.vpa,
+      pn: intent.payeeName,
+      am: amountStr,
+      cu: 'INR',
+      tr: intent.orderId,
+    }).toString();
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Opening UPI app…</title>
+  <style>
+    body { font-family: system-ui, sans-serif; display:flex; align-items:center;
+           justify-content:center; min-height:100vh; margin:0; background:#f8fafc; color:#0f172a; }
+    .card { max-width:22rem; text-align:center; padding:2rem; border-radius:1rem;
+            background:#fff; border:1px solid #e2e8f0; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+    .spinner { width:36px; height:36px; border:4px solid #e2e8f0; border-top:4px solid #0f172a;
+               border-radius:50%; animation:spin .8s linear infinite; margin:0 auto 1rem; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    a { color:#0f172a; }
+    .small { font-size:.8rem; color:#64748b; margin-top:1rem; }
+    iframe { border:0; width:1px; height:1px; position:absolute; top:-100px; left:-100px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner"></div>
+    <p>Opening your UPI app…</p>
+    <p class="small">If nothing happens, <a id="fallback" href="${escapeHtml(upiDeeplink)}">tap here</a>.</p>
+  </div>
+  <iframe name="sp_iframe" title="sabpaisa handshake"></iframe>
+  <form id="sp" method="POST" action="${pending.formActionUrl}" target="sp_iframe">
+    <input type="hidden" name="encData" value="${pending.encData}" />
+    <input type="hidden" name="clientCode" value="${pending.clientCode}" />
+  </form>
+  <script>
+    // 1) Register the transaction with SabPaisa via browser POST (same as /pay/).
+    document.getElementById('sp').submit();
+    // 2) After a short delay, redirect to the UPI deeplink. 600 ms is enough for the
+    //    iframe POST to fire; we don't need to wait for SabPaisa's response since
+    //    reconciliation happens out-of-band via callback + TxnEnquiry polling.
+    setTimeout(function () {
+      window.location.href = ${JSON.stringify(upiDeeplink)};
+    }, 600);
+  </script>
+</body>
+</html>`;
+
+  pendingPayments.delete(pgTxnId);
+  res.type('html').send(html);
+});
+
 // ── SabPaisa browser return (neutral path; thank-you HTML inline) ─
 app.get('/checkout/return/:txnId', handleSabPaisaCallback);
 
@@ -940,6 +1067,7 @@ if (hasPublicDir) {
     if (
       req.path.includes('/bosspay/') ||
       req.path.startsWith('/pay/') ||
+      req.path.startsWith('/upi/') ||
       req.path.startsWith('/webhooks/') ||
       req.path.startsWith('/api/') ||
       req.path.startsWith('/checkout/return')
@@ -959,7 +1087,15 @@ app.listen(PORT, () => {
   console.log(`Bridge base URL: ${normalizedBridgeBaseUrl}`);
   console.log(`SabPaisa env: ${SABPAISA_ENV}`);
   if (hasPublicDir) console.log('Frontend: serving React SPA');
-  console.log('Bridge routes: /wp-json/bosspay/v1/{health,collect,payout,status/:id}');
+  console.log('Bridge routes: /wp-json/bosspay/v1/{health,collect,payout,status/:id,upi/:txnId}');
+  console.log('Hosted checkout: /pay/:pgTxnId (auto-submit form to SabPaisa)');
+  console.log(
+    'UPI intent (direct-mint, v1.1.0+): /bosspay/v1/upi/:txnId — ' +
+    'confirmintentupiV1 → cached upi://pay?… (re-mint every 10 min)',
+  );
+  console.log(
+    'UPI intent (legacy iframe splash): /upi/:pgTxnId — kept for in-flight traffic without probed SabPaisa config',
+  );
   console.log(
     'SabPaisa callback routes: /checkout/return/:txnId (preferred); ' +
     'legacy /wp-json/bosspay/v1/callback/sabpaisa/:txnId; /webhooks/sabpaisa',

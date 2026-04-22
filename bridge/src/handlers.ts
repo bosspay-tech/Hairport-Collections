@@ -1,4 +1,4 @@
-import type { BridgeHandlers } from '@bosspay/bridge-node';
+import type { BridgeHandlers, UpiIntentMintInputs } from '@bosspay/bridge-node';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   buildSabPaisaEncData,
@@ -9,12 +9,35 @@ import {
 } from './sabpaisa.js';
 import { randomCustomerProfile } from './customer-pool.js';
 
-// In-memory store for encrypted payloads keyed by clientTxnId.
-// The /pay/:pgTxnId endpoint reads from here to serve the auto-submit form.
-export const pendingPayments = new Map<
-  string,
-  { encData: string; formActionUrl: string; clientCode: string }
->();
+/**
+ * In-memory store for encrypted payloads keyed by clientTxnId.
+ *
+ * Two /upi/:pgTxnId handling paths share the same entry:
+ *   1. Direct-mint (1.1.0+) — when BossPay forwards `sabpaisa_client_id`
+ *      + `sabpaisa_client_name` + `sabpaisa_endpoint_json.epId`, the bridge
+ *      calls SabPaisa's `confirmintentupiV1` directly (`upi_intent_mint_inputs`
+ *      is set on the CollectResult and `@bosspay/bridge-node`'s
+ *      `handleUpiIntent` is exposed via `/bosspay/v1/upi/:txnId`).
+ *   2. Legacy iframe-splash — when only `fixed_vpa` + `upi_payee_name` are
+ *      present, `/upi/:pgTxnId` renders the hidden-iframe SabPaisa init form
+ *      + `upi://pay?...&tr=<order_id>` redirect (kept for in-flight traffic).
+ *
+ * Either path is optional; if both are absent the /upi/ route returns 404.
+ */
+export type PendingPaymentEntry = {
+  encData: string;
+  formActionUrl: string;
+  clientCode: string;
+  /** Present only when BossPay forwarded non-empty `fixed_vpa` + `upi_payee_name`. */
+  upiIntent?: {
+    vpa: string;
+    payeeName: string;
+    orderId: string;
+    amountRupees: number;
+  };
+};
+
+export const pendingPayments = new Map<string, PendingPaymentEntry>();
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '');
@@ -31,7 +54,7 @@ function stripTrailingSlash(value: string): string {
 async function persistGatewayPayload(
   supabase: SupabaseClient,
   clientTxnId: string,
-  paymentEntry: { encData: string; formActionUrl: string; clientCode: string },
+  paymentEntry: PendingPaymentEntry,
 ): Promise<void> {
   const delays = [100, 250, 500, 1000];
   for (let i = 0; i < delays.length; i += 1) {
@@ -87,10 +110,15 @@ export function createSabPaisaHandlers(
         // reconciliation all reference the same UUID.
         const clientTxnId = req.txn_id;
 
-        // Customer-visible return URL (no wp-json/bosspay path). SabPaisa POSTs here
-        // after payment; we forward to BossPay server-side and render a thank-you page.
+        // Return URL SabPaisa POSTs after payment. Must match the URL that is
+        // registered on SabPaisa's return-URL allow-list for this client code,
+        // otherwise the hosted checkout shows "Merchant URL is not whitelisted"
+        // when the customer lands on the SabPaisa page. Keep the legacy path —
+        // `server.ts` also registers `/checkout/return/:txnId` for forward-compat
+        // once SabPaisa whitelists the neutral path, but until then we ship the
+        // allow-listed URL. Both route groups render the same inline thank-you.
         const callbackUrl =
-          `${normalizedBridgeBaseUrl}/checkout/return/${clientTxnId}`;
+          `${normalizedBridgeBaseUrl}/wp-json/bosspay/v1/callback/sabpaisa/${clientTxnId}`;
 
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
@@ -119,29 +147,106 @@ export function createSabPaisaHandlers(
           callbackUrl,
         });
 
-        const paymentEntry = { encData, formActionUrl, clientCode: config.clientCode };
+        // ── UPI-intent direct-mint path (v1.1.0+) ─────────────────────
+        // BossPay forwards the 3 probed SabPaisa config fields per-request so
+        // the bridge can call `confirmintentupiV1` directly. When all three
+        // are present we emit `upi_intent_url` that points to bridge-node's
+        // built-in /bosspay/v1/upi/:txnId handler (which reads the mint bag
+        // out of the TxnStore, calls `directMintUpiIntent`, caches the result
+        // for 10 min, and renders a `upi://pay?…` splash). No SabPaisa page
+        // is ever shown to the customer.
+        const sabClientId =
+          typeof req.sabpaisa_client_id === 'number' && req.sabpaisa_client_id > 0
+            ? req.sabpaisa_client_id
+            : 0;
+        const sabClientName =
+          typeof req.sabpaisa_client_name === 'string' && req.sabpaisa_client_name.trim()
+            ? req.sabpaisa_client_name.trim()
+            : '';
+        const sabEndpointJson =
+          req.sabpaisa_endpoint_json &&
+          typeof req.sabpaisa_endpoint_json === 'object' &&
+          typeof (req.sabpaisa_endpoint_json as { epId?: unknown }).epId === 'number' &&
+          ((req.sabpaisa_endpoint_json as { epId: number }).epId > 0)
+            ? (req.sabpaisa_endpoint_json as UpiIntentMintInputs['sabpaisa_endpoint_json'])
+            : null;
+        const directMintReady =
+          sabClientId > 0 && sabClientName !== '' && sabEndpointJson !== null && amountRupees > 0;
+
+        // ── Legacy fixed-VPA iframe splash (pre-1.1.0) ────────────────
+        // Kept so in-flight merchants still on the old plan can render
+        // /upi/:pgTxnId from their local config. Not a feature flag — the
+        // authoritative VPA on direct-mint comes from SabPaisa's response.
+        const rawVpa = typeof req.fixed_vpa === 'string' ? req.fixed_vpa.trim() : '';
+        const rawPayee =
+          typeof req.upi_payee_name === 'string' ? req.upi_payee_name.trim() : '';
+        const legacyUpiIntentConfig: PendingPaymentEntry['upiIntent'] =
+          rawVpa && rawPayee && amountRupees > 0
+            ? {
+                vpa: rawVpa,
+                payeeName: rawPayee,
+                orderId: clientTxnId,
+                amountRupees,
+              }
+            : undefined;
+
+        const paymentEntry: PendingPaymentEntry = {
+          encData,
+          formActionUrl,
+          clientCode: config.clientCode,
+          ...(legacyUpiIntentConfig ? { upiIntent: legacyUpiIntentConfig } : {}),
+        };
         pendingPayments.set(clientTxnId, paymentEntry);
 
-        // Clean up after 30 minutes
         setTimeout(() => pendingPayments.delete(clientTxnId), 30 * 60 * 1000);
 
-        // Persist to Supabase so the /pay/:pgTxnId page survives server restarts.
-        // The bridge's `handleCollect` writes the TxnStore row AFTER this
-        // handler returns, so the row may not exist yet when we try to update
-        // it. Short retry loop covers the race without the old 2 s setTimeout.
         persistGatewayPayload(supabase, clientTxnId, paymentEntry).catch((err) => {
           console.warn('[sabpaisa-createCollection] Supabase persist gave up:', err);
         });
 
+        const paymentUrl = `${normalizedBridgeBaseUrl}/pay/${clientTxnId}`;
+
+        // Direct-mint wins over the legacy iframe splash — the former returns
+        // an NPCI-registered `tr` with SabPaisa's own VPA (the only combination
+        // that reconciles correctly). Legacy path is kept as a strict fallback
+        // for BossPay instances that haven't yet probed the config.
+        let upiIntentUrl: string | undefined;
+        let upiIntentMintInputs: UpiIntentMintInputs | undefined;
+        if (directMintReady) {
+          upiIntentUrl = `${normalizedBridgeBaseUrl}/bosspay/v1/upi/${req.txn_id}`;
+          upiIntentMintInputs = {
+            enc_data: encData,
+            client_code: config.clientCode,
+            client_txn_id: clientTxnId,
+            action_url: formActionUrl,
+            amount_rupees: amountRupees,
+            email: payer.email,
+            phone: payer.mobile,
+            sabpaisa_client_id: sabClientId,
+            sabpaisa_client_name: sabClientName,
+            sabpaisa_endpoint_json: sabEndpointJson,
+            // Splash display hints only — authoritative VPA/name come from SabPaisa's
+            // `confirmintentupiV1` response.
+            ...(rawVpa ? { display_vpa: rawVpa } : {}),
+            ...(rawPayee ? { display_payee_name: rawPayee } : {}),
+          };
+        } else if (legacyUpiIntentConfig) {
+          upiIntentUrl = `${normalizedBridgeBaseUrl}/upi/${clientTxnId}`;
+        }
+
         console.log(
           '[sabpaisa-createCollection] payment_url=',
-          `${normalizedBridgeBaseUrl}/pay/${clientTxnId}`,
+          paymentUrl,
+          upiIntentUrl ? `upi_intent_url=${upiIntentUrl}` : '',
+          directMintReady ? '(direct-mint)' : legacyUpiIntentConfig ? '(legacy-splash)' : '',
         );
 
         return {
-          payment_url: `${normalizedBridgeBaseUrl}/pay/${clientTxnId}`,
+          payment_url: paymentUrl,
           pg_transaction_id: clientTxnId,
           mode: 'redirect' as const,
+          ...(upiIntentUrl ? { upi_intent_url: upiIntentUrl } : {}),
+          ...(upiIntentMintInputs ? { upi_intent_mint_inputs: upiIntentMintInputs } : {}),
         };
       },
 
