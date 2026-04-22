@@ -4,6 +4,7 @@ FROM node:20-alpine AS frontend-build
 WORKDIR /frontend
 
 COPY package.json package-lock.json* ./
+COPY bridge/vendor/ bridge/vendor/
 RUN npm install
 
 COPY index.html vite.config.js eslint.config.js ./
