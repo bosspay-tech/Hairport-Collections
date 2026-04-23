@@ -1193,4 +1193,32 @@ app.listen(PORT, () => {
     'SabPaisa callback routes: /checkout/return/:txnId (preferred); ' +
     'legacy /wp-json/bosspay/v1/callback/sabpaisa/:txnId; /webhooks/sabpaisa',
   );
+
+  // Diagnostic: print the exact SabPaisa-bound callbackUrl shape so operators
+  // can eyeball-compare it against the URL whitelisted on SabPaisa's merchant
+  // profile. SabPaisa rejects with "Merchant Url is not whitelisted" if the
+  // origin (scheme+host) of `callbackUrl` doesn't match what's registered for
+  // this clientCode. The most common silent regression is shipping the apex
+  // host (https://example.com) when SabPaisa was whitelisted with the WC
+  // canonical (https://www.example.com), since the WP plugin always sent the
+  // www variant. Also warn loudly when that's the case.
+  const callbackPathTemplate =
+    process.env.SABPAISA_CALLBACK_PATH_TEMPLATE ?? '/checkout/return/{uuid}';
+  const sampleCallbackUrl =
+    `${normalizedBridgeBaseUrl}${callbackPathTemplate.replace('{uuid}', '<txnId>')}`;
+  console.log(`SabPaisa callbackUrl shape: ${sampleCallbackUrl}`);
+  try {
+    const host = new URL(normalizedBridgeBaseUrl).hostname;
+    if (!host.startsWith('www.') && host.split('.').length === 2) {
+      console.warn(
+        `[sabpaisa-config] WARNING: BRIDGE_BASE_URL host is "${host}" (apex, no www). ` +
+          'If SabPaisa returns "Merchant Url is not whitelisted" at the checkout ' +
+          `screen, the most likely fix is BRIDGE_BASE_URL=https://www.${host} ` +
+          '(the WC canonical the WP plugin always sent and which SabPaisa typically ' +
+          'has on the merchant profile).',
+      );
+    }
+  } catch {
+    // BRIDGE_BASE_URL malformed — already validated upstream, ignore here.
+  }
 });
