@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@bosspay/bridge-node": "file:bridge/vendor/bosspay-bridge-node-1.1.0.tgz",
     "@supabase/supabase-js": "^2.95.3",
     "@tailwindcss/vite": "^4.1.18",
     "firebase": "^12.9.0",

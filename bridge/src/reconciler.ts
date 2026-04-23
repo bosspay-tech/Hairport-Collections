@@ -159,6 +159,48 @@ export function startSabPaisaReconciler(opts: ReconcilerOptions): ReconcilerHand
         parsed = await querySabPaisaStatus(opts.config, clientTxnId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+
+        // SabPaisa permanently 400s for txns that were never registered on their side
+        // (customer never opened /pay/). Retrying these every 5 s burns the event
+        // loop and the status endpoint with no chance of resolving; mark terminal
+        // so the row exits the sweep via the payment_status != 'pending' filter.
+        // NOTE: No bridge.forwardCallback here — there's no real SabPaisa txn to
+        // confirm; forwarding a synthetic 'failed' could false-negative downstream.
+        if (
+          msg.includes('HTTP 400') &&
+          msg.includes('Please enter correct clientTxnId')
+        ) {
+          console.warn(
+            `[reconciler] ${pgTxnId} terminal — SabPaisa does not know this ` +
+              `clientTxnId (customer likely never opened /pay/). Marking failed ` +
+              `and dropping from sweep.`,
+          );
+          try {
+            const { error: termErr } = await opts.supabase
+              .from(opts.table ?? 'bosspay_txns')
+              .update({
+                payment_status: 'failed',
+                gateway_payload: {
+                  source: 'reconciler_permanent_400',
+                  error: msg,
+                },
+                updated_at: new Date().toISOString(),
+              })
+              .eq('pg_transaction_id', pgTxnId);
+            if (termErr) {
+              console.warn(
+                `[reconciler] ${pgTxnId} terminal-mark update failed: ${termErr.message}`,
+              );
+            }
+          } catch (updateErr) {
+            console.warn(
+              `[reconciler] ${pgTxnId} terminal-mark threw:`,
+              updateErr,
+            );
+          }
+          return;
+        }
+
         console.warn(`[reconciler] ${pgTxnId} status-api failed: ${msg}`);
         return;
       }

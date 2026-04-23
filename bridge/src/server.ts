@@ -153,6 +153,69 @@ function stripTrailingSlash(value: string): string {
 }
 
 /**
+ * CSP + Referrer-Policy for the two HTML pages that host a cross-origin POST
+ * to SabPaisa (`/pay/:pgTxnId` and `/upi/:pgTxnId`).
+ *
+ * - Happy path is untouched: if no upstream CSP is set, this header lets the
+ *   existing auto-submit cross into `*.sabpaisa.in`.
+ * - If an upstream proxy/edge injects a restrictive `form-action 'self'`, the
+ *   browser intersects CSPs so this alone won't override it — but the paired
+ *   hidden user-gesture fallback in the HTML body still satisfies the separate
+ *   "bounce tracker / auto-submit" browser heuristic.
+ * - `allowFrame` is true for `/upi/`, which uses a hidden <iframe name="sp_iframe">
+ *   to perform the SabPaisa handshake in parallel with the upi:// redirect.
+ *
+ * No COOP/COEP is set — the bridge has no existing helmet layer and we don't
+ * want to introduce net-new policy surface that could interact with SabPaisa.
+ */
+function applySabPaisaHtmlHeaders(res: Response, allowFrame: boolean): void {
+  const directives = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "form-action 'self' https://securepay.sabpaisa.in https://*.sabpaisa.in",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+  ];
+  if (allowFrame) {
+    directives.push("frame-src 'self' https://*.sabpaisa.in");
+  }
+  res.setHeader('Content-Security-Policy', directives.join('; '));
+  res.setHeader('Referrer-Policy', 'no-referrer-when-downgrade');
+}
+
+/**
+ * Inline sentinel script embedded in the two SabPaisa auto-submit pages.
+ * Reveals the hidden `<div id="${targetId}" hidden>` fallback ONLY when
+ * auto-submit/redirect clearly didn't navigate away — so the happy path
+ * renders zero new UI in browsers that allow the cross-origin POST.
+ *
+ * Three independent reveal triggers (any one wins):
+ *   1. 2000 ms elapsed AND pagehide/beforeunload never fired AND page is still visible
+ *      → browser silently blocked the submit (most common on iOS Safari).
+ *   2. pageshow event with persisted=true → bfcache restore after a blocked submit.
+ *   3. If the user later backgrounds the tab we do NOT reveal — only a still-visible
+ *      same-URL state after the timer qualifies as "submit clearly failed".
+ */
+function buildFallbackSentinelScript(targetId: string): string {
+  return `(function(){
+  var leaving = false;
+  function reveal(){
+    if (leaving) return;
+    var el = document.getElementById(${JSON.stringify(targetId)});
+    if (el) el.hidden = false;
+  }
+  window.addEventListener('pagehide', function(){ leaving = true; }, { once: true });
+  window.addEventListener('beforeunload', function(){ leaving = true; }, { once: true });
+  window.addEventListener('pageshow', function(e){ if (e.persisted) reveal(); });
+  setTimeout(function(){
+    if (document.visibilityState === 'visible') reveal();
+  }, 2000);
+})();`;
+}
+
+/**
  * Strip the legacy `sp_` prefix that old deployments added to pg_transaction_id.
  * New deployments use the raw BossPay UUID as clientTxnId directly.
  */
@@ -598,31 +661,48 @@ app.get('/pay/:pgTxnId', async (req, res) => {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Redirecting to payment…</title>
   <style>
     body { font-family: system-ui, sans-serif; display: flex; align-items: center;
-           justify-content: center; min-height: 100vh; margin: 0; background: #f8fafc; }
-    .loader { text-align: center; }
+           justify-content: center; min-height: 100vh; margin: 0; background: #f8fafc;
+           color: #0f172a; padding: 1rem; }
+    .loader { text-align: center; max-width: 22rem; }
     .spinner { width: 40px; height: 40px; border: 4px solid #e2e8f0;
                border-top: 4px solid #0f172a; border-radius: 50%;
                animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .fallback { margin-top: 1.5rem; padding: 1rem; border-radius: 12px;
+                background: #fff; border: 1px solid #e2e8f0;
+                box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+    .fallback p { margin: 0 0 .75rem; font-size: .875rem; color: #475569; }
+    .btn-primary { display: inline-block; width: 100%; padding: .75rem 1rem;
+                   border: 0; border-radius: 8px; background: #0f172a;
+                   color: #fff; font-weight: 600; font-size: 1rem;
+                   cursor: pointer; }
+    .btn-primary:hover { background: #1e293b; }
   </style>
 </head>
 <body>
   <div class="loader">
     <div class="spinner"></div>
     <p>Redirecting to payment gateway…</p>
+    <div id="manual-fallback" class="fallback" hidden>
+      <p>If you aren't redirected automatically, tap the button below to continue.</p>
+      <button type="submit" form="pf" class="btn-primary">Continue to payment</button>
+    </div>
   </div>
   <form id="pf" method="POST" action="${pending.formActionUrl}">
     <input type="hidden" name="encData" value="${pending.encData}" />
     <input type="hidden" name="clientCode" value="${pending.clientCode}" />
   </form>
   <script>document.getElementById('pf').submit();</script>
+  <script>${buildFallbackSentinelScript('manual-fallback')}</script>
 </body>
 </html>`;
 
   pendingPayments.delete(pgTxnId);
+  applySabPaisaHtmlHeaders(res, false);
   res.type('html').send(html);
 });
 
@@ -714,7 +794,7 @@ app.get('/upi/:pgTxnId', async (req, res) => {
   <title>Opening UPI app…</title>
   <style>
     body { font-family: system-ui, sans-serif; display:flex; align-items:center;
-           justify-content:center; min-height:100vh; margin:0; background:#f8fafc; color:#0f172a; }
+           justify-content:center; min-height:100vh; margin:0; background:#f8fafc; color:#0f172a; padding:1rem; }
     .card { max-width:22rem; text-align:center; padding:2rem; border-radius:1rem;
             background:#fff; border:1px solid #e2e8f0; box-shadow:0 1px 3px rgba(0,0,0,.06); }
     .spinner { width:36px; height:36px; border:4px solid #e2e8f0; border-top:4px solid #0f172a;
@@ -723,6 +803,13 @@ app.get('/upi/:pgTxnId', async (req, res) => {
     a { color:#0f172a; }
     .small { font-size:.8rem; color:#64748b; margin-top:1rem; }
     iframe { border:0; width:1px; height:1px; position:absolute; top:-100px; left:-100px; }
+    .fallback { margin-top:1.25rem; padding-top:1rem; border-top:1px solid #e2e8f0; }
+    .fallback p { margin:0 0 .75rem; font-size:.875rem; color:#475569; }
+    .btn-primary { display:inline-block; width:100%; padding:.75rem 1rem;
+                   border:0; border-radius:8px; background:#0f172a;
+                   color:#fff; font-weight:600; font-size:1rem;
+                   text-decoration:none; cursor:pointer; }
+    .btn-primary:hover { background:#1e293b; }
   </style>
 </head>
 <body>
@@ -730,6 +817,10 @@ app.get('/upi/:pgTxnId', async (req, res) => {
     <div class="spinner"></div>
     <p>Opening your UPI app…</p>
     <p class="small">If nothing happens, <a id="fallback" href="${escapeHtml(upiDeeplink)}">tap here</a>.</p>
+    <div id="upi-fallback" class="fallback" hidden>
+      <p>We couldn't open your UPI app automatically.</p>
+      <a class="btn-primary" href="${escapeHtml(upiDeeplink)}">Tap to open UPI app</a>
+    </div>
   </div>
   <iframe name="sp_iframe" title="sabpaisa handshake"></iframe>
   <form id="sp" method="POST" action="${pending.formActionUrl}" target="sp_iframe">
@@ -746,10 +837,12 @@ app.get('/upi/:pgTxnId', async (req, res) => {
       window.location.href = ${JSON.stringify(upiDeeplink)};
     }, 600);
   </script>
+  <script>${buildFallbackSentinelScript('upi-fallback')}</script>
 </body>
 </html>`;
 
   pendingPayments.delete(pgTxnId);
+  applySabPaisaHtmlHeaders(res, true);
   res.type('html').send(html);
 });
 
