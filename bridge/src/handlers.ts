@@ -110,15 +110,21 @@ export function createSabPaisaHandlers(
         // reconciliation all reference the same UUID.
         const clientTxnId = req.txn_id;
 
-        // Return URL SabPaisa POSTs after payment. Must match the URL that is
-        // registered on SabPaisa's return-URL allow-list for this client code,
+        // Return URL SabPaisa POSTs after payment. Must sit inside the URL
+        // prefix registered on SabPaisa's allow-list for this client code,
         // otherwise the hosted checkout shows "Merchant URL is not whitelisted"
-        // when the customer lands on the SabPaisa page. Keep the legacy path —
-        // `server.ts` also registers `/checkout/return/:txnId` for forward-compat
-        // once SabPaisa whitelists the neutral path, but until then we ship the
-        // allow-listed URL. Both route groups render the same inline thank-you.
+        // before the form ever renders. SabPaisa's whitelist for this merchant
+        // is scoped to `/checkout/...` (inherited from the prior WP + WooCommerce
+        // setup, which posted `/checkout/order-received/...`), so we route the
+        // callback through the neutral `/checkout/return/:txnId` path that
+        // `server.ts` already handles with the same inline-thank-you + forward
+        // semantics as the legacy `/wp-json/bosspay/v1/callback/sabpaisa/:txnId`
+        // route. Template is env-overridable for emergency rollback without a
+        // code revert (set SABPAISA_CALLBACK_PATH_TEMPLATE to the legacy path).
+        const callbackPathTemplate =
+          process.env.SABPAISA_CALLBACK_PATH_TEMPLATE ?? '/checkout/return/{uuid}';
         const callbackUrl =
-          `${normalizedBridgeBaseUrl}/wp-json/bosspay/v1/callback/sabpaisa/${clientTxnId}`;
+          `${normalizedBridgeBaseUrl}${callbackPathTemplate.replace('{uuid}', clientTxnId)}`;
 
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
