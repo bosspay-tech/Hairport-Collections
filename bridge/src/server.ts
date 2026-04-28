@@ -19,6 +19,13 @@ import {
 } from './sabpaisa.js';
 import { startSabPaisaReconciler } from './reconciler.js';
 
+// ── Global Error Handlers ──────────────────────────────────────────
+// Prevent unhandled promise rejections (like the UPI_INTENT_MINT_FAILED
+// from the bridge-node library) from crashing the entire Node process.
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[uncaught-rejection] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // ── Environment ────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT ?? 3000);
 const BRIDGE_SECRET = process.env.BOSSPAY_BRIDGE_SECRET;
