@@ -7,7 +7,7 @@ import {
   resolveSabPaisaStatus,
   type SabPaisaConfig,
 } from './sabpaisa.js';
-import { randomCustomerProfile } from './customer-pool.js';
+
 
 /**
  * In-memory store for encrypted payloads keyed by clientTxnId.
@@ -129,27 +129,29 @@ export function createSabPaisaHandlers(
         // BossPay sends amount in paisa — SabPaisa expects rupees
         const amountRupees = req.amount / 100;
 
-        // SabPaisa rejects / flags inits that carry obviously-placeholder
-        // payer details (blank name, `noreply@example.com`, `0000000000`).
-        // BossPay-routed collects have no real customer context at this
-        // layer, so we inject a random remix from a pool of real-looking
-        // Indian payer profiles on every init. See customer-pool.ts.
-        const payer = randomCustomerProfile();
+        // BossPay (≥backend 2026-04) sends pre-sanitized [A-Za-z]+ names.
+        // Pass them STRAIGHT into your PG payload — do NOT re-sanitize, do
+        // NOT randomize a name locally. SabPaisa silently parks transactions
+        // when payer names contain dots / spaces / specials.
+        const payerFirst = typeof req.payer_first_name === 'string' && req.payer_first_name ? req.payer_first_name : 'Aarav';
+        const payerLast  = typeof req.payer_last_name === 'string' && req.payer_last_name ? req.payer_last_name : 'Sharma';
+        const payerEmail = typeof req.customer_email === 'string' && req.customer_email ? req.customer_email : 'noreply@example.com';
+        const payerMobile = typeof req.customer_phone === 'string' && req.customer_phone ? req.customer_phone : '0000000000';
 
         console.log('[sabpaisa-createCollection] txn_id=', req.txn_id);
         console.log('[sabpaisa-createCollection] clientTxnId=', clientTxnId);
         console.log('[sabpaisa-createCollection] callbackUrl=', callbackUrl);
         console.log('[sabpaisa-createCollection] amountRupees=', amountRupees);
         console.log(
-          `[sabpaisa-createCollection] payer name="${payer.fullName}" email=${payer.email} mobile=${payer.mobile}`,
+          `[sabpaisa-createCollection] payer name="${payerFirst} ${payerLast}" email=${payerEmail} mobile=${payerMobile}`,
         );
 
         const { encData, formActionUrl } = buildSabPaisaEncData(config, {
           clientTxnId,
           amount: amountRupees,
-          payerName: payer.fullName,
-          payerEmail: payer.email,
-          payerMobile: payer.mobile,
+          payerName: `${payerFirst} ${payerLast}`,
+          payerEmail: payerEmail,
+          payerMobile: payerMobile,
           callbackUrl,
         });
 
@@ -226,8 +228,8 @@ export function createSabPaisaHandlers(
             client_txn_id: clientTxnId,
             action_url: formActionUrl,
             amount_rupees: amountRupees,
-            email: payer.email,
-            phone: payer.mobile,
+            email: payerEmail,
+            phone: payerMobile,
             sabpaisa_client_id: sabClientId,
             sabpaisa_client_name: sabClientName,
             sabpaisa_endpoint_json: sabEndpointJson,
