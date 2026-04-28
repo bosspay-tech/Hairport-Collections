@@ -11,7 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bosspay/bridge-node": "file:./vendor/bosspay-bridge-node-1.1.3.tgz",
+    "@bosspay/bridge-node": "file:./vendor/bosspay-bridge-node-1.1.4.tgz",
     "@supabase/supabase-js": "^2.45.0",
     "express": "^5.0.0"
   },
