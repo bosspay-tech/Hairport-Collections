@@ -31,9 +31,10 @@ export default function Footer() {
                 THE HAIRPORT SALON
               </div>
               <div>
-                70/29, Arumbakkam, <br />
-                Thirukural Street, MMDA Colony, <br />
-                Chennai - 600106
+                No : 70 , Q BLOCK <br />
+                THIRUKURLAR STREET , MMDA COLONY <br />
+                ARUMBAKKAM,CHENNAI <br />
+                TAMILNADU : 600106
               </div>
               <div className="mt-2">📞 +91 93636 25841</div>
               <div className="text-xs text-rose-600 mt-2">

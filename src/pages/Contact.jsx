@@ -29,9 +29,10 @@ export default function Contact() {
                   ADDRESS
                 </div>
                 <p className="mt-1 leading-6">
-                  70/29, arumbakkam, <br /> thirukural street,mmda colony,
-                  <br />
-                  ch-600106
+                  No : 70 , Q BLOCK <br />
+                  THIRUKURLAR STREET , MMDA COLONY <br />
+                  ARUMBAKKAM,CHENNAI <br />
+                  TAMILNADU : 600106
                 </p>
               </div>
 
@@ -40,10 +41,10 @@ export default function Contact() {
                   MOBILE
                 </div>
                 <a
-                  href="tel:+917048179839"
+                  href="tel:+919363625841"
                   className="mt-1 inline-flex items-center gap-2 font-semibold text-rose-950 hover:text-rose-800"
                 >
-                  +91 9363625841
+                  +91 93636 25841
                 </a>
               </div>
               <div>
@@ -65,7 +66,7 @@ export default function Contact() {
             {/* Quick actions */}
             <div className="mt-6 flex flex-col gap-3 sm:flex-row">
               <a
-                href="tel:+917048179839"
+                href="tel:+919363625841"
                 className="inline-flex w-full items-center justify-center rounded-2xl bg-pink-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-pink-400 focus:outline-none focus:ring-4 focus:ring-pink-200"
               >
                 Call Now
@@ -121,7 +122,7 @@ export default function Contact() {
             ⏱️ Quick Response
           </span>
           <span className="rounded-full bg-rose-100 px-3 py-1">
-            📍 Surat, Gujarat
+            📍 Chennai, Tamil Nadu
           </span>
           <span className="rounded-full bg-rose-100 px-3 py-1">
             📞 Call Support
