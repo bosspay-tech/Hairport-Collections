@@ -1251,6 +1251,10 @@ async function handleAirpayReturn(req: Request, res: Response) {
         const decrypted = decryptAirpayCallback(airpayConfig, encryptedResponse);
         console.log('[airpay-return] decrypted callback:', JSON.stringify(decrypted).slice(0, 400));
         Object.assign(raw, decrypted);
+        // Flatten nested `data` object — actual txn fields live there
+        if (decrypted['data'] && typeof decrypted['data'] === 'object') {
+          Object.assign(raw, decrypted['data'] as Record<string, unknown>);
+        }
       } catch (err) {
         console.error('[airpay-return] failed to decrypt callback response:', err);
       }
@@ -1270,6 +1274,7 @@ async function handleAirpayReturn(req: Request, res: Response) {
     const apTxnId =
       firstString(raw['APTRANSACTIONID']) ||
       firstString(raw['aptransactionid']) ||
+      firstString(raw['ap_transactionid']) ||
       firstString(raw['TRANSACTIONID']) ||
       firstString(raw['transactionid']) ||
       '';
@@ -1277,6 +1282,7 @@ async function handleAirpayReturn(req: Request, res: Response) {
     const statusCode =
       firstString(raw['TRANSACTIONSTATUS']) ||
       firstString(raw['transactionstatus']) ||
+      firstString(raw['transaction_status']) ||
       firstString(raw['STATUS']) ||
       firstString(raw['status']) ||
       '';
