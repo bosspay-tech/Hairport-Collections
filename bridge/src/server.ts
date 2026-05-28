@@ -18,6 +18,13 @@ import {
   type SabPaisaConfig,
 } from './sabpaisa.js';
 import { startSabPaisaReconciler } from './reconciler.js';
+import {
+  buildAirpayV4Fields,
+  resolveAirpayStatus,
+  validateAirpayConfig,
+  verifyAirpayTransaction,
+  type AirpayConfig,
+} from './airpay.js';
 
 // ── Global Error Handlers ──────────────────────────────────────────
 // Prevent unhandled promise rejections (like the UPI_INTENT_MINT_FAILED
@@ -95,6 +102,48 @@ const handlers = createSabPaisaHandlers(
   BRIDGE_BASE_URL!,
   supabaseClient,
 );
+
+// ── Airpay v4 OAuth config (optional — Airpay disabled if credentials missing) ──
+// Credentials map to Airpay merchant portal fields:
+//   AIRPAY_MERCHANT_ID  → Portal "MID"
+//   AIRPAY_CLIENT_ID    → Portal "Client ID"
+//   AIRPAY_CLIENT_SECRET→ Portal "Secret Key" (32 hex chars)
+//   AIRPAY_USERNAME     → Portal "Username"
+//   AIRPAY_PASSWORD     → Portal "Password"
+//   AIRPAY_API_KEY      → Portal "API Key" (used for privatekey, not OAuth)
+const airpayMissing = validateAirpayConfig({
+  merchantId: process.env.AIRPAY_MERCHANT_ID,
+  clientId: process.env.AIRPAY_CLIENT_ID,
+  clientSecret: process.env.AIRPAY_CLIENT_SECRET,
+  username: process.env.AIRPAY_USERNAME,
+  password: process.env.AIRPAY_PASSWORD,
+  apiKey: process.env.AIRPAY_API_KEY,
+});
+
+const airpayConfig: AirpayConfig | null = airpayMissing.length === 0
+  ? {
+      merchantId: process.env.AIRPAY_MERCHANT_ID!,
+      clientId: process.env.AIRPAY_CLIENT_ID!,
+      clientSecret: process.env.AIRPAY_CLIENT_SECRET!,
+      username: process.env.AIRPAY_USERNAME!,
+      password: process.env.AIRPAY_PASSWORD!,
+      apiKey: process.env.AIRPAY_API_KEY!,
+      oauthUrl: process.env.AIRPAY_OAUTH_URL ?? 'https://kraken.airpay.co.in/airpay/pay/v4/api/oauth2',
+      payUrl: process.env.AIRPAY_PAY_URL ?? 'https://payments.airpay.co.in/pay/v4/',
+      verifyUrl: process.env.AIRPAY_VERIFY_URL ?? 'https://payments.airpay.co.in/order/verify.php',
+      successUrl: process.env.AIRPAY_SUCCESS_URL ?? '',
+      failureUrl: process.env.AIRPAY_FAILURE_URL ?? '',
+      domain: process.env.BRIDGE_BASE_URL ?? '',
+    }
+  : null;
+
+if (airpayMissing.length > 0) {
+  console.warn(
+    `[airpay] Missing env vars: ${airpayMissing.join(', ')} — Airpay payment option disabled.`,
+  );
+} else {
+  console.log('[airpay] Config loaded — Airpay payment option enabled.');
+}
 
 // ── BossPay Bridge ─────────────────────────────────────────────────
 const bridge = createBossPayBridge({
@@ -1068,6 +1117,241 @@ app.post(
   handleHairportCallback,
 );
 
+// ════════════════════════════════════════════════════════════════════
+// Airpay payment routes
+// POST /api/hairport/airpay/create      — build form fields, return to frontend
+// POST /api/hairport/airpay/callback    — server-to-server notification from Airpay
+// POST/GET /api/hairport/airpay/success — browser redirect from Airpay on success
+// POST/GET /api/hairport/airpay/failure — browser redirect from Airpay on failure
+// ════════════════════════════════════════════════════════════════════
+
+app.post(
+  '/api/hairport/airpay/create',
+  express.json({ limit: '64kb' }),
+  async (req, res) => {
+    if (!airpayConfig) {
+      res.status(503).json({ ok: false, error: 'Airpay payment is not configured on this server.' });
+      return;
+    }
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const txnId = sanitizeStorefrontString(body['txnId'], 80);
+
+      if (!txnId || !NON_EMPTY_STRING_RE.test(txnId)) {
+        res.status(400).json({ ok: false, error: 'Missing or invalid txnId' });
+        return;
+      }
+
+      // Fetch real order amount from DB — never trust the frontend value
+      const { data: order, error: orderError } = await supabaseClient
+        .from('orders')
+        .select('total, customer_email, customer_phone, customer_name, customer_address, customer_city, customer_state, customer_pincode')
+        .eq('transaction_id', txnId)
+        .maybeSingle();
+
+      if (orderError || !order) {
+        console.error('[airpay-create] order lookup failed:', orderError?.message ?? 'not found');
+        res.status(404).json({ ok: false, error: 'Order not found' });
+        return;
+      }
+
+      const amount = Number(order['total'] ?? 0);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ ok: false, error: 'Invalid order amount' });
+        return;
+      }
+
+      // Accept buyer fields from the request body for cases where the DB
+      // doesn't store all Airpay-required fields (address, city, state, pincode
+      // ARE stored; we use those as authoritative and fall back to request).
+      const buyerFirstName = sanitizeStorefrontString(body['buyerFirstName'], 60) ||
+        sanitizeStorefrontString(String(order['customer_name'] ?? '').split(/\s+/)[0], 60);
+      const rawNameParts = String(order['customer_name'] ?? '').trim().split(/\s+/);
+      const buyerLastName = sanitizeStorefrontString(body['buyerLastName'], 60) ||
+        (rawNameParts.length > 1 ? rawNameParts.slice(1).join(' ') : rawNameParts[0] ?? '');
+      const buyerEmail = sanitizeStorefrontString(String(order['customer_email'] ?? ''), 120);
+      const buyerPhone = sanitizeStorefrontString(String(order['customer_phone'] ?? ''), 20);
+      const buyerAddress = sanitizeStorefrontString(String(order['customer_address'] ?? ''), 200);
+      const buyerCity = sanitizeStorefrontString(String(order['customer_city'] ?? ''), 80);
+      const buyerState = sanitizeStorefrontString(String(order['customer_state'] ?? ''), 80);
+      const buyerCountry = sanitizeStorefrontString(body['buyerCountry'], 60) || 'India';
+      const buyerPinCode = sanitizeStorefrontString(String(order['customer_pincode'] ?? ''), 10);
+
+      if (!buyerEmail || !buyerFirstName) {
+        res.status(400).json({ ok: false, error: 'Incomplete buyer details on order' });
+        return;
+      }
+
+      console.log(`[airpay-create] txnId=${txnId} amount=${amount} buyer=${buyerEmail}`);
+
+      const { fields, payUrl } = await buildAirpayV4Fields(airpayConfig, {
+        buyerEmail,
+        buyerPhone,
+        buyerFirstName,
+        buyerLastName,
+        buyerAddress,
+        buyerCity,
+        buyerState,
+        buyerCountry,
+        buyerPinCode,
+        amount,
+        orderid: txnId,
+      });
+
+      // Mark the order as initiated via Airpay (best-effort)
+      await supabaseClient
+        .from('orders')
+        .update({ gateway: 'airpay' } as Record<string, unknown>)
+        .eq('transaction_id', txnId)
+        .then(({ error: e }) => {
+          if (e) console.warn('[airpay-create] gateway column update skipped:', e.message);
+        });
+
+      res.json({
+        ok: true,
+        fields,
+        payUrl,
+        txnId,
+      });
+    } catch (err) {
+      console.error('[airpay-create] error:', err);
+      res.status(500).json({ ok: false, error: 'Internal error' });
+    }
+  },
+);
+
+/** Shared handler for Airpay success, failure, and server-side callback. */
+async function handleAirpayReturn(req: Request, res: Response) {
+  if (!airpayConfig) {
+    res.status(503).send('Airpay not configured.');
+    return;
+  }
+  try {
+    const raw: Record<string, unknown> = {};
+    if (req.query && typeof req.query === 'object') {
+      Object.assign(raw, req.query as Record<string, unknown>);
+    }
+    if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
+      Object.assign(raw, req.body as Record<string, unknown>);
+    }
+    if (typeof req.body === 'string' && req.body.includes('=')) {
+      for (const [k, v] of new URLSearchParams(req.body).entries()) {
+        if (!(k in raw)) raw[k] = v;
+      }
+    }
+
+    console.log(`[airpay-return] inbound ${req.method} ${req.originalUrl}`);
+
+    // MERCHANTTRANSACTIONID is the orderid we sent — it equals txnId
+    const txnId =
+      firstString(raw['MERCHANTTRANSACTIONID']) ||
+      firstString(raw['merchanttransactionid']) ||
+      firstString(raw['CUSTOMVAR']) ||
+      firstString(raw['customvar']) ||
+      '';
+
+    const apTxnId =
+      firstString(raw['APTRANSACTIONID']) ||
+      firstString(raw['TRANSACTIONID']) ||
+      '';
+
+    const statusCode =
+      firstString(raw['TRANSACTIONSTATUS']) ||
+      firstString(raw['STATUS']) ||
+      firstString(raw['status']) ||
+      '';
+
+    const statusMsg =
+      firstString(raw['STATUSMSG']) ||
+      firstString(raw['MESSAGE']) ||
+      firstString(raw['message']) ||
+      '';
+
+    const amountStr =
+      firstString(raw['TRANSACTIONAMT']) ||
+      firstString(raw['amount']) ||
+      '0';
+
+    if (!txnId) {
+      console.error('[airpay-return] no merchant transaction ID in payload');
+      res.status(400).send('Missing transaction reference in Airpay response.');
+      return;
+    }
+
+    let status = resolveAirpayStatus(statusCode);
+    console.log(
+      `[airpay-return] txnId=${txnId} apTxnId=${apTxnId} statusCode=${statusCode} resolved=${status}`,
+    );
+
+    // Server-side verification before marking as paid
+    if (status === 'success') {
+      try {
+        const verifyResult = await verifyAirpayTransaction(airpayConfig, txnId);
+        console.log(
+          `[airpay-return] verify → status=${verifyResult.status} rawStatus=${verifyResult.rawStatus}`,
+        );
+        status = verifyResult.status;
+      } catch (err) {
+        // Verification failure → treat as pending; the merchant can manually verify
+        console.error('[airpay-return] verify request failed:', err);
+        status = 'pending';
+      }
+    }
+
+    const amountRupees = Number(amountStr) || 0;
+    const amountPaisa = Math.round(amountRupees * 100);
+    const orderStatus =
+      status === 'success' ? 'success' : status === 'failed' ? 'failed' : 'pending';
+
+    // Update order status in Supabase
+    try {
+      const { error: updateError } = await supabaseClient
+        .from('orders')
+        .update({
+          status: orderStatus,
+          gateway: 'airpay',
+          gateway_txn_id: apTxnId || undefined,
+        } as Record<string, unknown>)
+        .eq('transaction_id', txnId);
+      if (updateError) {
+        console.warn('[airpay-return] orders update failed:', updateError.message);
+      }
+    } catch (err) {
+      console.warn('[airpay-return] orders update threw:', err);
+    }
+
+    respondAfterCallback({
+      req,
+      res,
+      bareTxnId: txnId,
+      status,
+      amountPaisa,
+      message: statusMsg,
+      flow: 'hairport_native',
+      body: {
+        ok: true,
+        txnId,
+        status,
+        statusCode,
+        aptransactionid: apTxnId,
+        amount_paisa: amountPaisa,
+      },
+    });
+  } catch (err) {
+    console.error('[airpay-return] error:', err);
+    res.status(500).send('Error processing Airpay payment response.');
+  }
+}
+
+app.post('/api/hairport/airpay/callback', ...callbackBodyParsers, handleAirpayReturn);
+app.get('/api/hairport/airpay/callback', handleAirpayReturn);
+
+app.post('/api/hairport/airpay/success', ...callbackBodyParsers, handleAirpayReturn);
+app.get('/api/hairport/airpay/success', handleAirpayReturn);
+
+app.post('/api/hairport/airpay/failure', ...callbackBodyParsers, handleAirpayReturn);
+app.get('/api/hairport/airpay/failure', handleAirpayReturn);
+
 // ── On-demand status probe for the /order-success page ───────────────
 // SabPaisa's browser-redirect to our callbackURL is not 100% reliable —
 // sometimes the customer lands on /order-success without `encResponse`
@@ -1200,6 +1484,22 @@ app.listen(PORT, () => {
     'SabPaisa callback routes: /checkout/return/:txnId (preferred); ' +
     'legacy /wp-json/bosspay/v1/callback/sabpaisa/:txnId; /webhooks/sabpaisa',
   );
+  if (airpayConfig) {
+    console.log(
+      'Airpay routes: POST /api/hairport/airpay/create; ' +
+      'POST+GET /api/hairport/airpay/{callback,success,failure}',
+    );
+    console.log(
+      `Airpay success URL (register in Airpay merchant portal): ` +
+      (airpayConfig.successUrl || `${normalizedBridgeBaseUrl}/api/hairport/airpay/success`),
+    );
+    console.log(
+      `Airpay failure URL (register in Airpay merchant portal): ` +
+      (airpayConfig.failureUrl || `${normalizedBridgeBaseUrl}/api/hairport/airpay/failure`),
+    );
+  } else {
+    console.log('[airpay] Airpay not configured — set AIRPAY_MERCHANT_ID / AIRPAY_USERNAME / AIRPAY_PASSWORD / AIRPAY_API_KEY to enable.');
+  }
 
   // Diagnostic: print the exact SabPaisa-bound callbackUrl shape so operators
   // can eyeball-compare it against the URL whitelisted on SabPaisa's merchant
