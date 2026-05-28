@@ -20,6 +20,7 @@ import {
 import { startSabPaisaReconciler } from './reconciler.js';
 import {
   buildAirpayV4Fields,
+  decryptAirpayCallback,
   resolveAirpayStatus,
   validateAirpayConfig,
   verifyAirpayTransaction,
@@ -1241,22 +1242,29 @@ async function handleAirpayReturn(req: Request, res: Response) {
     }
 
     console.log(`[airpay-return] inbound ${req.method} ${req.originalUrl}`);
-    console.log(`[airpay-return] raw payload keys: ${Object.keys(raw).join(', ')}`);
-    console.log(`[airpay-return] raw payload: ${JSON.stringify(raw).slice(0, 500)}`);
+
+    // Airpay encrypts the entire callback body the same way as OAuth responses.
+    // When present, decrypt `response` and merge its fields into `raw`.
+    const encryptedResponse = firstString(raw['response']);
+    if (encryptedResponse) {
+      try {
+        const decrypted = decryptAirpayCallback(airpayConfig, encryptedResponse);
+        console.log('[airpay-return] decrypted callback:', JSON.stringify(decrypted).slice(0, 400));
+        Object.assign(raw, decrypted);
+      } catch (err) {
+        console.error('[airpay-return] failed to decrypt callback response:', err);
+      }
+    }
 
     // MERCHANTTRANSACTIONID is the orderid we sent — it equals txnId.
-    // Airpay field names vary across versions; cover all known variants.
     const txnId =
       firstString(raw['MERCHANTTRANSACTIONID']) ||
       firstString(raw['merchanttransactionid']) ||
-      firstString(raw['MerchantTransactionID']) ||
-      firstString(raw['merchant_transaction_id']) ||
       firstString(raw['orderid']) ||
       firstString(raw['ORDERID']) ||
       firstString(raw['order_id']) ||
       firstString(raw['CUSTOMVAR']) ||
       firstString(raw['customvar']) ||
-      firstString(raw['clientTxnId']) ||
       '';
 
     const apTxnId =
@@ -1287,8 +1295,7 @@ async function handleAirpayReturn(req: Request, res: Response) {
       '0';
 
     if (!txnId) {
-      // Log full payload to diagnose which field name Airpay actually uses
-      console.error('[airpay-return] no merchant transaction ID in payload. Full raw:', JSON.stringify(raw));
+      console.error('[airpay-return] no merchant transaction ID after decryption. raw keys:', Object.keys(raw).join(', '));
       res.status(400).send('Missing transaction reference in Airpay response.');
       return;
     }

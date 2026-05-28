@@ -283,6 +283,17 @@ export async function buildAirpayV4Fields(
   };
 }
 
+// ── Callback decryption ────────────────────────────────────────────────────
+
+export function decryptAirpayCallback(
+  config: AirpayConfig,
+  encryptedResponse: string,
+): Record<string, unknown> {
+  const key = computeAesKey(config);
+  const plain = decryptAes256Cbc(encryptedResponse, key);
+  return JSON.parse(plain) as Record<string, unknown>;
+}
+
 // ── Response status ────────────────────────────────────────────────────────
 
 const AIRPAY_STATUS_MAP: Record<string, 'success' | 'pending' | 'failed'> = {
