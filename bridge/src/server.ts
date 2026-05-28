@@ -1241,39 +1241,54 @@ async function handleAirpayReturn(req: Request, res: Response) {
     }
 
     console.log(`[airpay-return] inbound ${req.method} ${req.originalUrl}`);
+    console.log(`[airpay-return] raw payload keys: ${Object.keys(raw).join(', ')}`);
+    console.log(`[airpay-return] raw payload: ${JSON.stringify(raw).slice(0, 500)}`);
 
-    // MERCHANTTRANSACTIONID is the orderid we sent — it equals txnId
+    // MERCHANTTRANSACTIONID is the orderid we sent — it equals txnId.
+    // Airpay field names vary across versions; cover all known variants.
     const txnId =
       firstString(raw['MERCHANTTRANSACTIONID']) ||
       firstString(raw['merchanttransactionid']) ||
+      firstString(raw['MerchantTransactionID']) ||
+      firstString(raw['merchant_transaction_id']) ||
+      firstString(raw['orderid']) ||
+      firstString(raw['ORDERID']) ||
+      firstString(raw['order_id']) ||
       firstString(raw['CUSTOMVAR']) ||
       firstString(raw['customvar']) ||
+      firstString(raw['clientTxnId']) ||
       '';
 
     const apTxnId =
       firstString(raw['APTRANSACTIONID']) ||
+      firstString(raw['aptransactionid']) ||
       firstString(raw['TRANSACTIONID']) ||
+      firstString(raw['transactionid']) ||
       '';
 
     const statusCode =
       firstString(raw['TRANSACTIONSTATUS']) ||
+      firstString(raw['transactionstatus']) ||
       firstString(raw['STATUS']) ||
       firstString(raw['status']) ||
       '';
 
     const statusMsg =
       firstString(raw['STATUSMSG']) ||
+      firstString(raw['statusmsg']) ||
       firstString(raw['MESSAGE']) ||
       firstString(raw['message']) ||
       '';
 
     const amountStr =
       firstString(raw['TRANSACTIONAMT']) ||
+      firstString(raw['transactionamt']) ||
       firstString(raw['amount']) ||
       '0';
 
     if (!txnId) {
-      console.error('[airpay-return] no merchant transaction ID in payload');
+      // Log full payload to diagnose which field name Airpay actually uses
+      console.error('[airpay-return] no merchant transaction ID in payload. Full raw:', JSON.stringify(raw));
       res.status(400).send('Missing transaction reference in Airpay response.');
       return;
     }
