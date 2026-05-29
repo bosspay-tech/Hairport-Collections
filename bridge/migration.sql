@@ -1,5 +1,5 @@
 -- Run this in your Supabase SQL Editor to create (and/or extend) the
--- `bosspay_txns` table. The base 5 columns are what `@bosspay/bridge-node`
+-- `bosspay_txns` table. The base 5 columns are what `@dpx/bridge-node`
 -- (`SupabaseTxnStore`) reads/writes; the remaining columns are what this
 -- bridge's `server.ts` and SabPaisa reconciler need for webhook-miss recovery.
 --
@@ -38,7 +38,7 @@ create index if not exists bosspay_txns_reconcile_idx
   on public.bosspay_txns (pg_type, callback_forwarded_at, created_at);
 
 -- ── UPI-intent direct-mint cache columns ────────────────────────────
--- Added for @bosspay/bridge-node 1.1.0. The `SupabaseTxnStore.setUpiIntent`
+-- Added for bridge-node 1.1.0+. The `SupabaseTxnStore.setUpiIntent`
 -- writes the cached `upi_qr_value` + `intent_tr` into `upi_intent` (as JSONB)
 -- and the mint timestamp into `upi_minted_at` (epoch seconds). The bridge's
 -- `handleUpiIntent` reads these back on every `/bosspay/v1/upi/:txnId` visit

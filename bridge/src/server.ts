@@ -6,7 +6,7 @@ import {
   createBossPayBridge,
   toExpress,
   SupabaseTxnStore,
-} from '@bosspay/bridge-node';
+} from '@dpx/bridge-node';
 import { createClient } from '@supabase/supabase-js';
 import { createSabPaisaHandlers, pendingPayments } from './handlers.js';
 import {
@@ -42,6 +42,7 @@ const BRIDGE_BASE_URL = process.env.BRIDGE_BASE_URL;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const AIRPAY_V4_SOURCE_DOMAIN = process.env.AIRPAY_V4_SOURCE_DOMAIN;
 
 const SABPAISA_CLIENT_CODE = process.env.SABPAISA_CLIENT_CODE;
 const SABPAISA_USERNAME = process.env.SABPAISA_USERNAME;
@@ -103,6 +104,9 @@ const handlers = createSabPaisaHandlers(
   BRIDGE_BASE_URL!,
   supabaseClient,
 );
+const airpayV4SourceDomain = stripTrailingSlash(
+  AIRPAY_V4_SOURCE_DOMAIN ?? BRIDGE_BASE_URL!,
+);
 
 // ── Airpay v4 OAuth config (optional — Airpay disabled if credentials missing) ──
 // Credentials map to Airpay merchant portal fields:
@@ -153,6 +157,7 @@ const bridge = createBossPayBridge({
   handlers,
   txnStore,
   version: '1.0.0',
+  airpayV4SourceDomain,
 });
 
 // ── SabPaisa callback-miss reconciler ──────────────────────────────
@@ -182,6 +187,8 @@ const bridgeHandler = toExpress({
     txnStore,
     bosspayApiBase: API_BASE,
     version: '1.0.0',
+    bridgeSecret: BRIDGE_SECRET!,
+    airpayV4SourceDomain,
   },
   bridgeSecret: BRIDGE_SECRET!,
 });
@@ -666,7 +673,7 @@ app.use((req, res, next) => {
 
   if (isSabPaisaCallback) return next();
 
-  if (req.path.includes('/bosspay/v1/')) {
+  if (req.path.includes('/bosspay/v1/') || req.path.includes('/dpx-airpay/v1/')) {
     console.log(`[bridge] ${req.method} ${req.path} → bridgeHandler`);
     return bridgeHandler(req, res, next);
   }
@@ -1478,6 +1485,7 @@ if (hasPublicDir) {
   app.get('{*path}', (req, res) => {
     if (
       req.path.includes('/bosspay/') ||
+      req.path.includes('/dpx-airpay/') ||
       req.path.startsWith('/pay/') ||
       req.path.startsWith('/upi/') ||
       req.path.startsWith('/webhooks/') ||
@@ -1525,6 +1533,7 @@ app.listen(PORT, () => {
       `Airpay failure URL (register in Airpay merchant portal): ` +
       (airpayConfig.failureUrl || `${normalizedBridgeBaseUrl}/api/hairport/airpay/failure`),
     );
+    console.log(`DPX Airpay v4 source domain: ${airpayV4SourceDomain}`);
   } else {
     console.log('[airpay] Airpay not configured — set AIRPAY_MERCHANT_ID / AIRPAY_USERNAME / AIRPAY_PASSWORD / AIRPAY_API_KEY to enable.');
   }

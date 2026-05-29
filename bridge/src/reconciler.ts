@@ -19,7 +19,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { BossPayBridge } from '@bosspay/bridge-node';
+import type { BossPayBridge } from '@dpx/bridge-node';
 import {
   querySabPaisaStatus,
   resolveSabPaisaStatus,

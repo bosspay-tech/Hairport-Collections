@@ -1,4 +1,4 @@
-import type { BridgeHandlers, UpiIntentMintInputs } from '@bosspay/bridge-node';
+import type { BridgeHandlers, UpiIntentMintInputs } from '@dpx/bridge-node';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   buildSabPaisaEncData,
@@ -16,7 +16,7 @@ import {
  *   1. Direct-mint (1.1.0+) — when BossPay forwards `sabpaisa_client_id`
  *      + `sabpaisa_client_name` + `sabpaisa_endpoint_json.epId`, the bridge
  *      calls SabPaisa's `confirmintentupiV1` directly (`upi_intent_mint_inputs`
- *      is set on the CollectResult and `@bosspay/bridge-node`'s
+ *      is set on the CollectResult and `@dpx/bridge-node`'s
  *      `handleUpiIntent` is exposed via `/bosspay/v1/upi/:txnId`).
  *   2. Legacy iframe-splash — when only `fixed_vpa` + `upi_payee_name` are
  *      present, `/upi/:pgTxnId` renders the hidden-iframe SabPaisa init form
@@ -45,7 +45,7 @@ function stripTrailingSlash(value: string): string {
 
 /**
  * Upsert `gateway_payload` on the bosspay_txns row. The row is written by
- * `handleCollect` in `@bosspay/bridge-node` immediately AFTER the lender's
+ * `handleCollect` in `@dpx/bridge-node` immediately AFTER the lender's
  * `createCollection` resolves, so on fast Supabase round-trips we may race
  * ahead of the insert. Retry a few times with short backoff; if all retries
  * miss, the SabPaisa reconciler (or a subsequent client request) will
