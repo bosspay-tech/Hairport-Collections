@@ -57,7 +57,7 @@ create index if not exists bosspay_txns_upi_minted_at_idx
 
 -- ── Airpay integration columns on `orders` ──────────────────────────
 -- Run this block after enabling Airpay. Safe to re-run (add column if not exists).
--- `gateway`        — which PG processed the order ('sabpaisa' | 'airpay')
+-- `gateway`        — which PG processed the order ('sabpaisa' | 'airpay' | 'airpay2')
 -- `gateway_txn_id` — gateway's own transaction ID (APTRANSACTIONID from Airpay)
 alter table public.orders
   add column if not exists gateway        text,

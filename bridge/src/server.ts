@@ -108,7 +108,7 @@ const airpayV4SourceDomain = stripTrailingSlash(
   AIRPAY_V4_SOURCE_DOMAIN ?? BRIDGE_BASE_URL!,
 );
 
-// ── Airpay v4 OAuth config (optional — Airpay disabled if credentials missing) ──
+// ── Airpay v4 OAuth configs (optional — each option is disabled if credentials missing) ──
 // Credentials map to Airpay merchant portal fields:
 //   AIRPAY_MERCHANT_ID  → Portal "MID"
 //   AIRPAY_CLIENT_ID    → Portal "Client ID"
@@ -116,31 +116,48 @@ const airpayV4SourceDomain = stripTrailingSlash(
 //   AIRPAY_USERNAME     → Portal "Username"
 //   AIRPAY_PASSWORD     → Portal "Password"
 //   AIRPAY_API_KEY      → Portal "API Key" (used for privatekey, not OAuth)
-const airpayMissing = validateAirpayConfig({
-  merchantId: process.env.AIRPAY_MERCHANT_ID,
-  clientId: process.env.AIRPAY_CLIENT_ID,
-  clientSecret: process.env.AIRPAY_CLIENT_SECRET,
-  username: process.env.AIRPAY_USERNAME,
-  password: process.env.AIRPAY_PASSWORD,
-  apiKey: process.env.AIRPAY_API_KEY,
-});
+const DEFAULT_AIRPAY_OAUTH_URL = 'https://kraken.airpay.co.in/airpay/pay/v4/api/oauth2';
+const DEFAULT_AIRPAY_PAY_URL = 'https://payments.airpay.co.in/pay/v4/';
+const DEFAULT_AIRPAY_VERIFY_URL = 'https://payments.airpay.co.in/order/verify.php';
 
-const airpayConfig: AirpayConfig | null = airpayMissing.length === 0
-  ? {
-      merchantId: process.env.AIRPAY_MERCHANT_ID!,
-      clientId: process.env.AIRPAY_CLIENT_ID!,
-      clientSecret: process.env.AIRPAY_CLIENT_SECRET!,
-      username: process.env.AIRPAY_USERNAME!,
-      password: process.env.AIRPAY_PASSWORD!,
-      apiKey: process.env.AIRPAY_API_KEY!,
-      oauthUrl: process.env.AIRPAY_OAUTH_URL ?? 'https://kraken.airpay.co.in/airpay/pay/v4/api/oauth2',
-      payUrl: process.env.AIRPAY_PAY_URL ?? 'https://payments.airpay.co.in/pay/v4/',
-      verifyUrl: process.env.AIRPAY_VERIFY_URL ?? 'https://payments.airpay.co.in/order/verify.php',
-      successUrl: process.env.AIRPAY_SUCCESS_URL ?? '',
-      failureUrl: process.env.AIRPAY_FAILURE_URL ?? '',
+function loadAirpayConfig(envPrefix: 'AIRPAY' | 'AIRPAY2'): {
+  config: AirpayConfig | null;
+  missing: string[];
+} {
+  const missing = validateAirpayConfig({
+    merchantId: process.env[`${envPrefix}_MERCHANT_ID`],
+    clientId: process.env[`${envPrefix}_CLIENT_ID`],
+    clientSecret: process.env[`${envPrefix}_CLIENT_SECRET`],
+    username: process.env[`${envPrefix}_USERNAME`],
+    password: process.env[`${envPrefix}_PASSWORD`],
+    apiKey: process.env[`${envPrefix}_API_KEY`],
+  });
+
+  if (missing.length > 0) {
+    return { config: null, missing };
+  }
+
+  return {
+    config: {
+      merchantId: process.env[`${envPrefix}_MERCHANT_ID`]!,
+      clientId: process.env[`${envPrefix}_CLIENT_ID`]!,
+      clientSecret: process.env[`${envPrefix}_CLIENT_SECRET`]!,
+      username: process.env[`${envPrefix}_USERNAME`]!,
+      password: process.env[`${envPrefix}_PASSWORD`]!,
+      apiKey: process.env[`${envPrefix}_API_KEY`]!,
+      oauthUrl: process.env[`${envPrefix}_OAUTH_URL`] ?? DEFAULT_AIRPAY_OAUTH_URL,
+      payUrl: process.env[`${envPrefix}_PAY_URL`] ?? DEFAULT_AIRPAY_PAY_URL,
+      verifyUrl: process.env[`${envPrefix}_VERIFY_URL`] ?? DEFAULT_AIRPAY_VERIFY_URL,
+      successUrl: process.env[`${envPrefix}_SUCCESS_URL`] ?? '',
+      failureUrl: process.env[`${envPrefix}_FAILURE_URL`] ?? '',
       domain: process.env.BRIDGE_BASE_URL ?? '',
-    }
-  : null;
+    },
+    missing: [],
+  };
+}
+
+const { config: airpayConfig, missing: airpayMissing } = loadAirpayConfig('AIRPAY');
+const { config: airpay2Config, missing: airpay2Missing } = loadAirpayConfig('AIRPAY2');
 
 if (airpayMissing.length > 0) {
   console.warn(
@@ -148,6 +165,14 @@ if (airpayMissing.length > 0) {
   );
 } else {
   console.log('[airpay] Config loaded — Airpay payment option enabled.');
+}
+
+if (airpay2Missing.length > 0) {
+  console.warn(
+    `[airpay2] Missing env vars: ${airpay2Missing.join(', ')} — Airpay 2 payment option disabled.`,
+  );
+} else {
+  console.log('[airpay2] Config loaded — Airpay 2 payment option enabled.');
 }
 
 // ── BossPay Bridge ─────────────────────────────────────────────────
@@ -1127,111 +1152,123 @@ app.post(
 
 // ════════════════════════════════════════════════════════════════════
 // Airpay payment routes
-// POST /api/hairport/airpay/create      — build form fields, return to frontend
-// POST /api/hairport/airpay/callback    — server-to-server notification from Airpay
-// POST/GET /api/hairport/airpay/success — browser redirect from Airpay on success
-// POST/GET /api/hairport/airpay/failure — browser redirect from Airpay on failure
+// POST /api/hairport/{airpay,airpay2}/create      — build form fields, return to frontend
+// POST /api/hairport/{airpay,airpay2}/callback    — server-to-server notification from Airpay
+// POST/GET /api/hairport/{airpay,airpay2}/success — browser redirect from Airpay on success
+// POST/GET /api/hairport/{airpay,airpay2}/failure — browser redirect from Airpay on failure
 // ════════════════════════════════════════════════════════════════════
 
-app.post(
-  '/api/hairport/airpay/create',
-  express.json({ limit: '64kb' }),
-  async (req, res) => {
-    if (!airpayConfig) {
-      res.status(503).json({ ok: false, error: 'Airpay payment is not configured on this server.' });
+type AirpayRouteContext = {
+  label: string;
+  routeSegment: 'airpay' | 'airpay2';
+  gateway: 'airpay' | 'airpay2';
+  logPrefix: string;
+  config: AirpayConfig | null;
+};
+
+async function handleAirpayCreate(
+  req: Request,
+  res: Response,
+  ctx: AirpayRouteContext,
+) {
+  if (!ctx.config) {
+    res.status(503).json({ ok: false, error: `${ctx.label} payment is not configured on this server.` });
+    return;
+  }
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const txnId = sanitizeStorefrontString(body['txnId'], 80);
+
+    if (!txnId || !NON_EMPTY_STRING_RE.test(txnId)) {
+      res.status(400).json({ ok: false, error: 'Missing or invalid txnId' });
       return;
     }
-    try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const txnId = sanitizeStorefrontString(body['txnId'], 80);
 
-      if (!txnId || !NON_EMPTY_STRING_RE.test(txnId)) {
-        res.status(400).json({ ok: false, error: 'Missing or invalid txnId' });
-        return;
-      }
+    // Fetch real order amount from DB — never trust the frontend value
+    const { data: order, error: orderError } = await supabaseClient
+      .from('orders')
+      .select('total, customer_email, customer_phone, customer_name, customer_address, customer_city, customer_state, customer_pincode')
+      .eq('transaction_id', txnId)
+      .maybeSingle();
 
-      // Fetch real order amount from DB — never trust the frontend value
-      const { data: order, error: orderError } = await supabaseClient
-        .from('orders')
-        .select('total, customer_email, customer_phone, customer_name, customer_address, customer_city, customer_state, customer_pincode')
-        .eq('transaction_id', txnId)
-        .maybeSingle();
-
-      if (orderError || !order) {
-        console.error('[airpay-create] order lookup failed:', orderError?.message ?? 'not found');
-        res.status(404).json({ ok: false, error: 'Order not found' });
-        return;
-      }
-
-      const amount = Number(order['total'] ?? 0);
-      if (!Number.isFinite(amount) || amount <= 0) {
-        res.status(400).json({ ok: false, error: 'Invalid order amount' });
-        return;
-      }
-
-      // Accept buyer fields from the request body for cases where the DB
-      // doesn't store all Airpay-required fields (address, city, state, pincode
-      // ARE stored; we use those as authoritative and fall back to request).
-      const buyerFirstName = sanitizeStorefrontString(body['buyerFirstName'], 60) ||
-        sanitizeStorefrontString(String(order['customer_name'] ?? '').split(/\s+/)[0], 60);
-      const rawNameParts = String(order['customer_name'] ?? '').trim().split(/\s+/);
-      const buyerLastName = sanitizeStorefrontString(body['buyerLastName'], 60) ||
-        (rawNameParts.length > 1 ? rawNameParts.slice(1).join(' ') : rawNameParts[0] ?? '');
-      const buyerEmail = sanitizeStorefrontString(String(order['customer_email'] ?? ''), 120);
-      const buyerPhone = sanitizeStorefrontString(String(order['customer_phone'] ?? ''), 20);
-      const buyerAddress = sanitizeStorefrontString(String(order['customer_address'] ?? ''), 200);
-      const buyerCity = sanitizeStorefrontString(String(order['customer_city'] ?? ''), 80);
-      const buyerState = sanitizeStorefrontString(String(order['customer_state'] ?? ''), 80);
-      const buyerCountry = sanitizeStorefrontString(body['buyerCountry'], 60) || 'India';
-      const buyerPinCode = sanitizeStorefrontString(String(order['customer_pincode'] ?? ''), 10);
-
-      if (!buyerEmail || !buyerFirstName) {
-        res.status(400).json({ ok: false, error: 'Incomplete buyer details on order' });
-        return;
-      }
-
-      console.log(`[airpay-create] txnId=${txnId} amount=${amount} buyer=${buyerEmail}`);
-
-      const { fields, payUrl } = await buildAirpayV4Fields(airpayConfig, {
-        buyerEmail,
-        buyerPhone,
-        buyerFirstName,
-        buyerLastName,
-        buyerAddress,
-        buyerCity,
-        buyerState,
-        buyerCountry,
-        buyerPinCode,
-        amount,
-        orderid: txnId,
-      });
-
-      // Mark the order as initiated via Airpay (best-effort)
-      await supabaseClient
-        .from('orders')
-        .update({ gateway: 'airpay' } as Record<string, unknown>)
-        .eq('transaction_id', txnId)
-        .then(({ error: e }) => {
-          if (e) console.warn('[airpay-create] gateway column update skipped:', e.message);
-        });
-
-      res.json({
-        ok: true,
-        fields,
-        payUrl,
-        txnId,
-      });
-    } catch (err) {
-      console.error('[airpay-create] error:', err);
-      res.status(500).json({ ok: false, error: 'Internal error' });
+    if (orderError || !order) {
+      console.error(`[${ctx.logPrefix}-create] order lookup failed:`, orderError?.message ?? 'not found');
+      res.status(404).json({ ok: false, error: 'Order not found' });
+      return;
     }
-  },
-);
+
+    const amount = Number(order['total'] ?? 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      res.status(400).json({ ok: false, error: 'Invalid order amount' });
+      return;
+    }
+
+    // Accept buyer fields from the request body for cases where the DB
+    // doesn't store all Airpay-required fields (address, city, state, pincode
+    // ARE stored; we use those as authoritative and fall back to request).
+    const buyerFirstName = sanitizeStorefrontString(body['buyerFirstName'], 60) ||
+      sanitizeStorefrontString(String(order['customer_name'] ?? '').split(/\s+/)[0], 60);
+    const rawNameParts = String(order['customer_name'] ?? '').trim().split(/\s+/);
+    const buyerLastName = sanitizeStorefrontString(body['buyerLastName'], 60) ||
+      (rawNameParts.length > 1 ? rawNameParts.slice(1).join(' ') : rawNameParts[0] ?? '');
+    const buyerEmail = sanitizeStorefrontString(String(order['customer_email'] ?? ''), 120);
+    const buyerPhone = sanitizeStorefrontString(String(order['customer_phone'] ?? ''), 20);
+    const buyerAddress = sanitizeStorefrontString(String(order['customer_address'] ?? ''), 200);
+    const buyerCity = sanitizeStorefrontString(String(order['customer_city'] ?? ''), 80);
+    const buyerState = sanitizeStorefrontString(String(order['customer_state'] ?? ''), 80);
+    const buyerCountry = sanitizeStorefrontString(body['buyerCountry'], 60) || 'India';
+    const buyerPinCode = sanitizeStorefrontString(String(order['customer_pincode'] ?? ''), 10);
+
+    if (!buyerEmail || !buyerFirstName) {
+      res.status(400).json({ ok: false, error: 'Incomplete buyer details on order' });
+      return;
+    }
+
+    console.log(`[${ctx.logPrefix}-create] txnId=${txnId} amount=${amount} buyer=${buyerEmail}`);
+
+    const { fields, payUrl } = await buildAirpayV4Fields(ctx.config, {
+      buyerEmail,
+      buyerPhone,
+      buyerFirstName,
+      buyerLastName,
+      buyerAddress,
+      buyerCity,
+      buyerState,
+      buyerCountry,
+      buyerPinCode,
+      amount,
+      orderid: txnId,
+    });
+
+    // Mark the order as initiated via this Airpay MID (best-effort)
+    await supabaseClient
+      .from('orders')
+      .update({ gateway: ctx.gateway } as Record<string, unknown>)
+      .eq('transaction_id', txnId)
+      .then(({ error: e }) => {
+        if (e) console.warn(`[${ctx.logPrefix}-create] gateway column update skipped:`, e.message);
+      });
+
+    res.json({
+      ok: true,
+      fields,
+      payUrl,
+      txnId,
+    });
+  } catch (err) {
+    console.error(`[${ctx.logPrefix}-create] error:`, err);
+    res.status(500).json({ ok: false, error: 'Internal error' });
+  }
+}
 
 /** Shared handler for Airpay success, failure, and server-side callback. */
-async function handleAirpayReturn(req: Request, res: Response) {
-  if (!airpayConfig) {
-    res.status(503).send('Airpay not configured.');
+async function handleAirpayReturn(
+  req: Request,
+  res: Response,
+  ctx: AirpayRouteContext,
+) {
+  if (!ctx.config) {
+    res.status(503).send(`${ctx.label} not configured.`);
     return;
   }
   try {
@@ -1248,22 +1285,22 @@ async function handleAirpayReturn(req: Request, res: Response) {
       }
     }
 
-    console.log(`[airpay-return] inbound ${req.method} ${req.originalUrl}`);
+    console.log(`[${ctx.logPrefix}-return] inbound ${req.method} ${req.originalUrl}`);
 
     // Airpay encrypts the entire callback body the same way as OAuth responses.
     // When present, decrypt `response` and merge its fields into `raw`.
     const encryptedResponse = firstString(raw['response']);
     if (encryptedResponse) {
       try {
-        const decrypted = decryptAirpayCallback(airpayConfig, encryptedResponse);
-        console.log('[airpay-return] decrypted callback:', JSON.stringify(decrypted).slice(0, 400));
+        const decrypted = decryptAirpayCallback(ctx.config, encryptedResponse);
+        console.log(`[${ctx.logPrefix}-return] decrypted callback:`, JSON.stringify(decrypted).slice(0, 400));
         Object.assign(raw, decrypted);
         // Flatten nested `data` object — actual txn fields live there
         if (decrypted['data'] && typeof decrypted['data'] === 'object') {
           Object.assign(raw, decrypted['data'] as Record<string, unknown>);
         }
       } catch (err) {
-        console.error('[airpay-return] failed to decrypt callback response:', err);
+        console.error(`[${ctx.logPrefix}-return] failed to decrypt callback response:`, err);
       }
     }
 
@@ -1308,27 +1345,27 @@ async function handleAirpayReturn(req: Request, res: Response) {
       '0';
 
     if (!txnId) {
-      console.error('[airpay-return] no merchant transaction ID after decryption. raw keys:', Object.keys(raw).join(', '));
+      console.error(`[${ctx.logPrefix}-return] no merchant transaction ID after decryption. raw keys:`, Object.keys(raw).join(', '));
       res.status(400).send('Missing transaction reference in Airpay response.');
       return;
     }
 
     let status = resolveAirpayStatus(statusCode);
     console.log(
-      `[airpay-return] txnId=${txnId} apTxnId=${apTxnId} statusCode=${statusCode} resolved=${status}`,
+      `[${ctx.logPrefix}-return] txnId=${txnId} apTxnId=${apTxnId} statusCode=${statusCode} resolved=${status}`,
     );
 
     // Server-side verification before marking as paid
     if (status === 'success') {
       try {
-        const verifyResult = await verifyAirpayTransaction(airpayConfig, txnId);
+        const verifyResult = await verifyAirpayTransaction(ctx.config, txnId);
         console.log(
-          `[airpay-return] verify → status=${verifyResult.status} rawStatus=${verifyResult.rawStatus}`,
+          `[${ctx.logPrefix}-return] verify → status=${verifyResult.status} rawStatus=${verifyResult.rawStatus}`,
         );
         status = verifyResult.status;
       } catch (err) {
         // Verification failure → treat as pending; the merchant can manually verify
-        console.error('[airpay-return] verify request failed:', err);
+        console.error(`[${ctx.logPrefix}-return] verify request failed:`, err);
         status = 'pending';
       }
     }
@@ -1344,15 +1381,15 @@ async function handleAirpayReturn(req: Request, res: Response) {
         .from('orders')
         .update({
           status: orderStatus,
-          gateway: 'airpay',
+          gateway: ctx.gateway,
           gateway_txn_id: apTxnId || undefined,
         } as Record<string, unknown>)
         .eq('transaction_id', txnId);
       if (updateError) {
-        console.warn('[airpay-return] orders update failed:', updateError.message);
+        console.warn(`[${ctx.logPrefix}-return] orders update failed:`, updateError.message);
       }
     } catch (err) {
-      console.warn('[airpay-return] orders update threw:', err);
+      console.warn(`[${ctx.logPrefix}-return] orders update threw:`, err);
     }
 
     respondAfterCallback({
@@ -1373,19 +1410,51 @@ async function handleAirpayReturn(req: Request, res: Response) {
       },
     });
   } catch (err) {
-    console.error('[airpay-return] error:', err);
-    res.status(500).send('Error processing Airpay payment response.');
+    console.error(`[${ctx.logPrefix}-return] error:`, err);
+    res.status(500).send(`Error processing ${ctx.label} payment response.`);
   }
 }
 
-app.post('/api/hairport/airpay/callback', ...callbackBodyParsers, handleAirpayReturn);
-app.get('/api/hairport/airpay/callback', handleAirpayReturn);
+function registerAirpayRoutes(ctx: AirpayRouteContext): void {
+  const basePath = `/api/hairport/${ctx.routeSegment}`;
 
-app.post('/api/hairport/airpay/success', ...callbackBodyParsers, handleAirpayReturn);
-app.get('/api/hairport/airpay/success', handleAirpayReturn);
+  app.post(
+    `${basePath}/create`,
+    express.json({ limit: '64kb' }),
+    async (req, res) => handleAirpayCreate(req, res, ctx),
+  );
 
-app.post('/api/hairport/airpay/failure', ...callbackBodyParsers, handleAirpayReturn);
-app.get('/api/hairport/airpay/failure', handleAirpayReturn);
+  app.post(`${basePath}/callback`, ...callbackBodyParsers, async (req, res) => (
+    handleAirpayReturn(req, res, ctx)
+  ));
+  app.get(`${basePath}/callback`, async (req, res) => handleAirpayReturn(req, res, ctx));
+
+  app.post(`${basePath}/success`, ...callbackBodyParsers, async (req, res) => (
+    handleAirpayReturn(req, res, ctx)
+  ));
+  app.get(`${basePath}/success`, async (req, res) => handleAirpayReturn(req, res, ctx));
+
+  app.post(`${basePath}/failure`, ...callbackBodyParsers, async (req, res) => (
+    handleAirpayReturn(req, res, ctx)
+  ));
+  app.get(`${basePath}/failure`, async (req, res) => handleAirpayReturn(req, res, ctx));
+}
+
+registerAirpayRoutes({
+  label: 'Airpay',
+  routeSegment: 'airpay',
+  gateway: 'airpay',
+  logPrefix: 'airpay',
+  config: airpayConfig,
+});
+
+registerAirpayRoutes({
+  label: 'Airpay 2',
+  routeSegment: 'airpay2',
+  gateway: 'airpay2',
+  logPrefix: 'airpay2',
+  config: airpay2Config,
+});
 
 // ── On-demand status probe for the /order-success page ───────────────
 // SabPaisa's browser-redirect to our callbackURL is not 100% reliable —
@@ -1536,6 +1605,22 @@ app.listen(PORT, () => {
     console.log(`DPX Airpay v4 source domain: ${airpayV4SourceDomain}`);
   } else {
     console.log('[airpay] Airpay not configured — set AIRPAY_MERCHANT_ID / AIRPAY_USERNAME / AIRPAY_PASSWORD / AIRPAY_API_KEY to enable.');
+  }
+  if (airpay2Config) {
+    console.log(
+      'Airpay 2 routes: POST /api/hairport/airpay2/create; ' +
+      'POST+GET /api/hairport/airpay2/{callback,success,failure}',
+    );
+    console.log(
+      `Airpay 2 success URL (register in Airpay merchant portal): ` +
+      (airpay2Config.successUrl || `${normalizedBridgeBaseUrl}/api/hairport/airpay2/success`),
+    );
+    console.log(
+      `Airpay 2 failure URL (register in Airpay merchant portal): ` +
+      (airpay2Config.failureUrl || `${normalizedBridgeBaseUrl}/api/hairport/airpay2/failure`),
+    );
+  } else {
+    console.log('[airpay2] Airpay 2 not configured — set AIRPAY2_MERCHANT_ID / AIRPAY2_USERNAME / AIRPAY2_PASSWORD / AIRPAY2_API_KEY to enable.');
   }
 
   // Diagnostic: print the exact SabPaisa-bound callbackUrl shape so operators

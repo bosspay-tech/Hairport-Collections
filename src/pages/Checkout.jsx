@@ -89,7 +89,7 @@ export default function Checkout() {
   // Payment method selection state
   const [step, setStep] = useState("form"); // "form" | "choosing"
   const [pendingTxnId, setPendingTxnId] = useState(null);
-  const [paymentLoading, setPaymentLoading] = useState(null); // null | "sabpaisa" | "airpay"
+  const [paymentLoading, setPaymentLoading] = useState(null); // null | "sabpaisa" | "airpay" | "airpay2"
 
   const subtotal = useMemo(() => Number(total()), [total]);
   const totalItems = useMemo(
@@ -191,17 +191,23 @@ export default function Checkout() {
   };
 
   // Step 2b: pay via Airpay — backend computes hash, frontend auto-submits form
-  const handleAirpay = async () => {
+  const handleAirpay = async (gateway = "airpay") => {
+    const isAirpay2 = gateway === "airpay2";
+    const label = isAirpay2 ? "Airpay 2" : "Airpay";
+    const endpoint = isAirpay2
+      ? "/api/hairport/airpay2/create"
+      : "/api/hairport/airpay/create";
+
     try {
       setError("");
-      setPaymentLoading("airpay");
+      setPaymentLoading(gateway);
 
       const nameParts = customer.name.trim().split(/\s+/);
       const buyerFirstName = nameParts[0] || "";
       const buyerLastName =
         nameParts.length > 1 ? nameParts.slice(1).join(" ") : nameParts[0] || "";
 
-      const resp = await fetch("/api/hairport/airpay/create", {
+      const resp = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -220,11 +226,11 @@ export default function Checkout() {
 
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
-        throw new Error(body?.error || `Airpay init failed (HTTP ${resp.status})`);
+        throw new Error(body?.error || `${label} init failed (HTTP ${resp.status})`);
       }
 
       const { fields, payUrl } = await resp.json();
-      if (!fields || !payUrl) throw new Error("Airpay init returned incomplete data.");
+      if (!fields || !payUrl) throw new Error(`${label} init returned incomplete data.`);
 
       // Build a hidden form and auto-submit to Airpay's hosted payment page
       const form = document.createElement("form");
@@ -241,7 +247,7 @@ export default function Checkout() {
       document.body.appendChild(form);
       form.submit();
     } catch (err) {
-      setError(err.message || "Could not initiate Airpay payment.");
+      setError(err.message || `Could not initiate ${label} payment.`);
       setPaymentLoading(null);
     }
   };
@@ -620,7 +626,7 @@ export default function Checkout() {
 
                     {/* Airpay card */}
                     <button
-                      onClick={handleAirpay}
+                      onClick={() => handleAirpay()}
                       disabled={paymentLoading !== null}
                       className={[
                         "w-full flex items-center gap-3 rounded-xl border px-4 py-3.5 text-left transition-all",
@@ -658,6 +664,53 @@ export default function Checkout() {
                       {/* Trailing indicator */}
                       <span className="shrink-0 text-slate-400">
                         {paymentLoading === "airpay" ? (
+                          <Spinner size={16} />
+                        ) : (
+                          <ChevronRight />
+                        )}
+                      </span>
+                    </button>
+
+                    {/* Airpay 2 card */}
+                    <button
+                      onClick={() => handleAirpay("airpay2")}
+                      disabled={paymentLoading !== null}
+                      className={[
+                        "w-full flex items-center gap-3 rounded-xl border px-4 py-3.5 text-left transition-all",
+                        "focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:ring-offset-1",
+                        paymentLoading === "airpay2"
+                          ? "border-indigo-200 bg-indigo-50/60 cursor-not-allowed"
+                          : paymentLoading !== null
+                          ? "border-slate-200 bg-white opacity-50 cursor-not-allowed"
+                          : "border-slate-200 bg-white hover:border-indigo-300 hover:bg-indigo-50/40 hover:shadow-sm cursor-pointer",
+                      ].join(" ")}
+                    >
+                      {/* Icon badge */}
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <CardIcon />
+                      </span>
+
+                      {/* Label / redirect notice */}
+                      <span className="min-w-0 flex-1">
+                        {paymentLoading === "airpay2" ? (
+                          <span className="block text-sm font-medium text-indigo-700 leading-tight">
+                            Redirecting to Airpay 2…
+                          </span>
+                        ) : (
+                          <>
+                            <span className="block text-sm font-semibold text-slate-900 leading-tight">
+                              Airpay 2
+                            </span>
+                            <span className="block text-xs text-slate-500 mt-0.5">
+                              Cards · UPI · Wallets · Net Banking
+                            </span>
+                          </>
+                        )}
+                      </span>
+
+                      {/* Trailing indicator */}
+                      <span className="shrink-0 text-slate-400">
+                        {paymentLoading === "airpay2" ? (
                           <Spinner size={16} />
                         ) : (
                           <ChevronRight />
