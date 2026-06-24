@@ -1,1 +1,0 @@
-431d515289ae01f8a427f4c6645d2802e892b4b6c4a57f993993ae12472cb8cc  bosspay-bridge-node-1.1.5.tgz
