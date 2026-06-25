@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import { Cormorant_Garamond, DM_Sans } from "next/font/google";
 import { Footer } from "@/components/layout/footer";
 import { Navbar } from "@/components/layout/navbar";
@@ -41,6 +42,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${dmSans.variable} ${cormorant.variable} h-full`}>
+      <head>
+        <Script src="/runtime-env.js" strategy="beforeInteractive" />
+      </head>
       <body className="flex min-h-full flex-col antialiased">
         <Providers>
           <Navbar />
