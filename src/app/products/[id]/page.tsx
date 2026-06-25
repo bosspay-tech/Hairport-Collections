@@ -8,7 +8,6 @@ import { toast } from "sonner";
 import { ShoppingBag, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { STORE_ID } from "@/config/store";
 import { getProxiedImage } from "@/lib/image-proxy";
 import { supabase } from "@/lib/supabase/client";
 import { formatMoney } from "@/lib/utils";
@@ -36,7 +35,6 @@ export default function ProductDetailPage() {
         .from("products")
         .select("*")
         .eq("id", params.id)
-        .eq("store_id", STORE_ID)
         .single();
 
       if (!alive) return;
@@ -66,7 +64,6 @@ export default function ProductDetailPage() {
     if (!product || product.is_active === false) return;
     addItem({
       productId: product.id,
-      storeId: STORE_ID,
       title: product.title,
       price,
     });

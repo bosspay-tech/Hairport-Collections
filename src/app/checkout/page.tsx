@@ -9,7 +9,6 @@ import { ProtectedRoute } from "@/components/auth/protected-route";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/components/providers/auth-provider";
-import { STORE_ID } from "@/config/store";
 import { supabase } from "@/lib/supabase/client";
 import { formatMoney } from "@/lib/utils";
 import { useCartStore } from "@/store/cart-store";
@@ -95,7 +94,6 @@ function CheckoutContent() {
       const txnId = generateTxnId();
 
       const { error: insertError } = await supabase.from("orders").insert({
-        store_id: STORE_ID,
         user_id: user?.id || null,
         items,
         total: subtotal,

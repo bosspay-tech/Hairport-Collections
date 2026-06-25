@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const STORE_ID = process.env.STORE_ID || "all-store";
-
 const SAMPLE_PRODUCTS = [
   {
     title: "Salon Repair Shampoo",
@@ -87,8 +85,7 @@ export async function POST() {
   const db = createClient(url, key);
   const { count, error: countError } = await db
     .from("products")
-    .select("*", { count: "exact", head: true })
-    .eq("store_id", STORE_ID);
+    .select("*", { count: "exact", head: true });
 
   if (countError) {
     return NextResponse.json(
@@ -107,7 +104,6 @@ export async function POST() {
 
   const rows = SAMPLE_PRODUCTS.map((product) => ({
     ...product,
-    store_id: STORE_ID,
     is_active: true,
   }));
 

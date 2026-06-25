@@ -22,7 +22,6 @@ function loadEnv() {
 const env = { ...loadEnv(), ...process.env };
 const url = env.NEXT_PUBLIC_SUPABASE_URL;
 const key = env.SUPABASE_SERVICE_ROLE_KEY;
-const STORE_ID = env.STORE_ID || "all-store";
 
 const SAMPLE_PRODUCTS = [
   {
@@ -97,8 +96,7 @@ const db = createClient(url, key);
 
 const { count, error: countError } = await db
   .from("products")
-  .select("*", { count: "exact", head: true })
-  .eq("store_id", STORE_ID);
+  .select("*", { count: "exact", head: true });
 
 if (countError) {
   console.error(
@@ -109,13 +107,12 @@ if (countError) {
 }
 
 if ((count ?? 0) > 0) {
-  console.log(`Store already has ${count} products. Skipping seed.`);
+  console.log(`Database already has ${count} products. Skipping seed.`);
   process.exit(0);
 }
 
 const rows = SAMPLE_PRODUCTS.map((product) => ({
   ...product,
-  store_id: STORE_ID,
   is_active: true,
 }));
 
@@ -126,4 +123,4 @@ if (error) {
   process.exit(1);
 }
 
-console.log(`Seeded ${rows.length} sample products for store_id=${STORE_ID}`);
+console.log(`Seeded ${rows.length} sample products.`);

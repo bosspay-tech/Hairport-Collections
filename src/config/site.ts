@@ -25,7 +25,6 @@ export const siteConfig = {
   description:
     "Shop salon-grade hair care, skin care, and treatments with secure checkout and fast delivery across India.",
   url: getSiteUrl(),
-  storeId: process.env.NEXT_PUBLIC_STORE_ID || process.env.STORE_ID || "all-store",
   contact: {
     email: process.env.NEXT_PUBLIC_CONTACT_EMAIL || "hello@thehairportsalon.com",
     phone: process.env.NEXT_PUBLIC_CONTACT_PHONE || "",
@@ -39,7 +38,6 @@ export const productionEnvKeys = [
   "NEXT_PUBLIC_SUPABASE_URL",
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
-  "STORE_ID",
   "SITE_URL",
   "NEXT_PUBLIC_SITE_URL",
   "ADMIN_EMAILS",

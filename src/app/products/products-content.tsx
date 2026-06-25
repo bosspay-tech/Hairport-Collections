@@ -6,7 +6,6 @@ import { useSearchParams } from "next/navigation";
 import { ProductCard, ProductCardSkeleton } from "@/components/products/product-card";
 import { Input } from "@/components/ui/input";
 import { Pagination } from "@/components/ui/pagination";
-import { STORE_ID } from "@/config/store";
 import { supabase } from "@/lib/supabase/client";
 import type { Product } from "@/types";
 
@@ -31,7 +30,6 @@ export function ProductsContent() {
       let request = supabase
         .from("products")
         .select("*")
-        .eq("store_id", STORE_ID)
         .eq("is_active", true)
         .order("created_at", { ascending: false });
 

@@ -5,7 +5,6 @@ import Link from "next/link";
 import { ProtectedRoute } from "@/components/auth/protected-route";
 import { OrderCard } from "@/components/orders/order-card";
 import { useAuth } from "@/components/providers/auth-provider";
-import { STORE_ID } from "@/config/store";
 import { supabase } from "@/lib/supabase/client";
 import { formatMoney } from "@/lib/utils";
 import type { Order } from "@/types";
@@ -31,7 +30,6 @@ function OrdersContent() {
         .from("orders")
         .select("*")
         .eq("user_id", user.id)
-        .eq("store_id", STORE_ID)
         .order("created_at", { ascending: false });
 
       if (!alive) return;

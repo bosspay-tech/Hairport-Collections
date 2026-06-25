@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { unauthorizedResponse, verifyAdmin } from "@/lib/admin-auth";
 import { getServiceClient } from "@/lib/supabase/service";
 
-const STORE_ID = process.env.STORE_ID || "all-store";
-
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(request: Request, context: RouteContext) {
@@ -17,7 +15,6 @@ export async function GET(request: Request, context: RouteContext) {
     .from("products")
     .select("*")
     .eq("id", id)
-    .eq("store_id", STORE_ID)
     .single();
 
   if (error) {
@@ -101,7 +98,6 @@ export async function PATCH(request: Request, context: RouteContext) {
     .from("products")
     .update(updates)
     .eq("id", id)
-    .eq("store_id", STORE_ID)
     .select()
     .single();
 
@@ -119,11 +115,7 @@ export async function DELETE(request: Request, context: RouteContext) {
   const { id } = await context.params;
   const db = getServiceClient();
 
-  const { error } = await db
-    .from("products")
-    .delete()
-    .eq("id", id)
-    .eq("store_id", STORE_ID);
+  const { error } = await db.from("products").delete().eq("id", id);
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

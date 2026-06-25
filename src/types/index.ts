@@ -15,7 +15,6 @@ export type Product = {
 
 export type CartItem = {
   productId: string;
-  storeId: string;
   title: string;
   price: number;
   quantity: number;
@@ -25,7 +24,7 @@ export type CartItem = {
 
 export type Order = {
   id: string;
-  store_id: string;
+  store_id?: string;
   user_id?: string | null;
   items: CartItem[];
   total: number;

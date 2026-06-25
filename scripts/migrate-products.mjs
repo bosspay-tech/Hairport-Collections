@@ -42,7 +42,6 @@ const oldKey =
   oldEnv.VITE_SUPABASE_PUBLISHABLE_KEY ||
   oldEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-const STORE_ID = env.STORE_ID || "all-store";
 const BATCH_SIZE = 100;
 
 if (!newUrl || !newKey) {
@@ -81,7 +80,6 @@ async function fetchAllOldProducts() {
     const { data, error } = await oldDb
       .from("products")
       .select("*")
-      .eq("store_id", STORE_ID)
       .order("created_at", { ascending: true })
       .range(from, from + BATCH_SIZE - 1);
 
@@ -104,15 +102,11 @@ async function fetchAllOldProducts() {
 async function migrateProducts(products) {
   const { count } = await newDb
     .from("products")
-    .select("*", { count: "exact", head: true })
-    .eq("store_id", STORE_ID);
+    .select("*", { count: "exact", head: true });
 
   if ((count ?? 0) > 0) {
-    console.log(`New database already has ${count} products. Clearing store products first...`);
-    const { error: deleteError } = await newDb
-      .from("products")
-      .delete()
-      .eq("store_id", STORE_ID);
+    console.log(`New database already has ${count} products. Clearing products first...`);
+    const { error: deleteError } = await newDb.from("products").delete().neq("id", "00000000-0000-0000-0000-000000000000");
     if (deleteError) {
       console.error("Could not clear existing products:", deleteError.message);
       process.exit(1);
@@ -123,7 +117,6 @@ async function migrateProducts(products) {
 
   for (let i = 0; i < products.length; i += BATCH_SIZE) {
     const batch = products.slice(i, i + BATCH_SIZE).map((product) => ({
-      store_id: product.store_id || STORE_ID,
       title: product.title,
       description: product.description,
       base_price: product.base_price,

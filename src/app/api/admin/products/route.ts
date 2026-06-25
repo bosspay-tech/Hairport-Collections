@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { unauthorizedResponse, verifyAdmin } from "@/lib/admin-auth";
 import { getServiceClient } from "@/lib/supabase/service";
 
-const STORE_ID = process.env.STORE_ID || "all-store";
-
 export async function GET(request: Request) {
   const user = await verifyAdmin(request);
   if (!user) return unauthorizedResponse();
@@ -18,7 +16,6 @@ export async function GET(request: Request) {
   const { data, error, count } = await db
     .from("products")
     .select("*", { count: "exact" })
-    .eq("store_id", STORE_ID)
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -61,7 +58,6 @@ export async function POST(request: Request) {
     body.rating != null && body.rating !== "" ? Number(body.rating) : null;
 
   const row = {
-    store_id: STORE_ID,
     title,
     description: body.description ? String(body.description).trim() : null,
     base_price: basePrice,
@@ -109,11 +105,7 @@ export async function DELETE(request: Request) {
   }
 
   const db = getServiceClient();
-  const { error } = await db
-    .from("products")
-    .delete()
-    .eq("store_id", STORE_ID)
-    .in("id", ids);
+  const { error } = await db.from("products").delete().in("id", ids);
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
