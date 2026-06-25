@@ -14,7 +14,10 @@ export function ProductCard({ product }: { product: Product }) {
     : 0;
 
   return (
-    <article className="group relative flex h-full flex-col overflow-hidden rounded-3xl border border-rose-100 bg-white shadow-sm transition duration-300 hover:-translate-y-1 hover:border-rose-200 hover:shadow-xl hover:shadow-rose-900/5">
+    <Link
+      href={`/products/${product.id}`}
+      className="group relative flex h-full flex-col overflow-hidden rounded-3xl border border-rose-100 bg-white shadow-sm transition duration-300 hover:-translate-y-1 hover:border-rose-200 hover:shadow-xl hover:shadow-rose-900/5"
+    >
       <div className="relative aspect-4/5 overflow-hidden bg-rose-50">
         <Image
           src={getProxiedImage(product.image_url)}
@@ -59,16 +62,15 @@ export function ProductCard({ product }: { product: Product }) {
             ) : null}
             <p className="text-xl font-bold text-rose-950">{formatMoney(price)}</p>
           </div>
-          <Link
-            href={`/products/${product.id}`}
-            className="flex h-10 w-10 items-center justify-center rounded-2xl bg-rose-50 text-rose-900 transition hover:bg-rose-900 hover:text-white"
-            aria-label={`View ${product.title}`}
+          <span
+            className="flex h-10 w-10 items-center justify-center rounded-2xl bg-rose-50 text-rose-900 transition group-hover:bg-rose-900 group-hover:text-white"
+            aria-hidden
           >
             <ArrowUpRight className="h-4 w-4" />
-          </Link>
+          </span>
         </div>
       </div>
-    </article>
+    </Link>
   );
 }
 

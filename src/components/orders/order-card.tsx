@@ -1,6 +1,8 @@
 "use client";
 
+import Image from "next/image";
 import { toast } from "sonner";
+import { getProxiedImage } from "@/lib/image-proxy";
 import { cn, formatMoney } from "@/lib/utils";
 import type { Order } from "@/types";
 
@@ -56,19 +58,30 @@ export function OrderCard({ order }: { order: Order }) {
           {items.map((item, index) => (
             <div
               key={`${item.productId}-${index}`}
-              className="flex items-start justify-between gap-4 rounded-2xl border border-rose-100 bg-white p-3"
+              className="flex items-start gap-3 rounded-2xl border border-rose-100 bg-white p-3"
             >
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-rose-950">
-                  {item.title || "Item"}
-                </p>
-                <p className="mt-2 text-xs text-rose-600">
-                  Qty: {item.quantity} • {formatMoney(item.price)} each
+              <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-rose-50">
+                <Image
+                  src={getProxiedImage(item.imageUrl)}
+                  alt={item.title || "Product"}
+                  fill
+                  className="object-cover"
+                  sizes="64px"
+                />
+              </div>
+              <div className="flex min-w-0 flex-1 items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-rose-950">
+                    {item.title || "Item"}
+                  </p>
+                  <p className="mt-2 text-xs text-rose-600">
+                    Qty: {item.quantity} • {formatMoney(item.price)} each
+                  </p>
+                </div>
+                <p className="shrink-0 text-sm font-bold text-rose-950">
+                  {formatMoney(item.price * item.quantity)}
                 </p>
               </div>
-              <p className="text-sm font-bold text-rose-950">
-                {formatMoney(item.price * item.quantity)}
-              </p>
             </div>
           ))}
         </div>

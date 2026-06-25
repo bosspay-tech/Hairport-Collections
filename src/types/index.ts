@@ -18,6 +18,7 @@ export type CartItem = {
   title: string;
   price: number;
   quantity: number;
+  imageUrl?: string | null;
   variantSku?: string;
   variantLabel?: string;
 };

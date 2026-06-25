@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ProductCard, ProductCardSkeleton } from "@/components/products/product-card";
 import { Input } from "@/components/ui/input";
@@ -130,9 +129,7 @@ export function ProductsContent() {
               </p>
               <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
                 {paginatedProducts.map((product) => (
-                  <Link key={product.id} href={`/products/${product.id}`}>
-                    <ProductCard product={product} />
-                  </Link>
+                  <ProductCard key={product.id} product={product} />
                 ))}
               </div>
 

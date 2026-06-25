@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { useAuth } from "@/components/providers/auth-provider";
 import { supabase } from "@/lib/supabase/client";
 import { formatMoney } from "@/lib/utils";
+import { lookupPincode } from "@/lib/pincode";
 import { useCartStore } from "@/store/cart-store";
 import type { CustomerDetails } from "@/types";
 
@@ -33,6 +34,8 @@ function CheckoutContent() {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [pincodeLoading, setPincodeLoading] = useState(false);
+  const [pincodeHint, setPincodeHint] = useState("");
 
   const subtotal = useMemo(() => total(), [total, items]);
   const totalItems = useMemo(
@@ -54,10 +57,58 @@ function CheckoutContent() {
     }));
   }, [user]);
 
+  useEffect(() => {
+    const pin = customer.pincode.trim();
+    if (!/^\d{6}$/.test(pin)) {
+      setPincodeHint("");
+      setPincodeLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setPincodeLoading(true);
+    setPincodeHint("");
+
+    lookupPincode(pin)
+      .then((result) => {
+        if (cancelled) return;
+        if (result) {
+          setCustomer((prev) => ({
+            ...prev,
+            city: result.city,
+            state: result.state,
+          }));
+          setPincodeHint("City and state filled from pincode.");
+        } else {
+          setPincodeHint("Pincode not found. Enter city and state manually.");
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPincodeHint("Could not fetch location. Enter city and state manually.");
+      })
+      .finally(() => {
+        if (!cancelled) setPincodeLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [customer.pincode]);
+
   const handleChange = (
     event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
   ) => {
     const { name, value } = event.target;
+
+    if (name === "pincode") {
+      setCustomer((prev) => ({
+        ...prev,
+        pincode: value.replace(/\D/g, "").slice(0, 6),
+      }));
+      return;
+    }
+
     setCustomer((prev) => ({ ...prev, [name]: value }));
   };
 
@@ -139,12 +190,7 @@ function CheckoutContent() {
     <div className="min-h-[70vh] bg-linear-to-b from-rose-50/60 via-white to-white">
       <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h1 className="font-display text-4xl text-rose-950">Checkout</h1>
-            <p className="mt-2 text-sm text-rose-600">
-              Enter shipping details and place your order. No external payment bridge required.
-            </p>
-          </div>
+        
           <div className="flex gap-2 text-sm">
             <div className="rounded-2xl border border-rose-100 bg-white px-4 py-2">
               Items: <span className="font-semibold">{totalItems}</span>
@@ -171,9 +217,9 @@ function CheckoutContent() {
                     { name: "name", label: "Full Name", type: "text", full: true },
                     { name: "email", label: "Email", type: "email", full: false },
                     { name: "phone", label: "Phone", type: "tel", full: false },
+                    { name: "pincode", label: "Pincode", type: "text", full: false },
                     { name: "city", label: "City", type: "text", full: false },
                     { name: "state", label: "State", type: "text", full: false },
-                    { name: "pincode", label: "Pincode", type: "text", full: false },
                   ] as const
                 ).map((field) => (
                   <div
@@ -182,14 +228,25 @@ function CheckoutContent() {
                   >
                     <label className="text-sm font-medium text-rose-900">
                       {field.label}
+                      {field.name === "pincode" && pincodeLoading ? (
+                        <span className="ml-2 text-xs font-normal text-rose-500">
+                          Looking up…
+                        </span>
+                      ) : null}
                     </label>
                     <Input
                       name={field.name}
                       type={field.type}
                       value={customer[field.name]}
                       onChange={handleChange}
+                      maxLength={field.name === "pincode" ? 6 : undefined}
+                      inputMode={field.name === "pincode" ? "numeric" : undefined}
+                      placeholder={field.name === "pincode" ? "6-digit pincode" : undefined}
                       className="mt-2"
                     />
+                    {field.name === "pincode" && pincodeHint ? (
+                      <p className="mt-1.5 text-xs text-rose-500">{pincodeHint}</p>
+                    ) : null}
                   </div>
                 ))}
                 <div className="sm:col-span-2">

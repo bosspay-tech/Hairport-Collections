@@ -66,6 +66,7 @@ export default function ProductDetailPage() {
       productId: product.id,
       title: product.title,
       price,
+      imageUrl: product.image_url,
     });
     toast.success(
       qtyInCart > 0

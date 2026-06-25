@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { Minus, Plus, ShoppingBag, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { getProxiedImage } from "@/lib/image-proxy";
 import { formatMoney } from "@/lib/utils";
 import { useCartStore } from "@/store/cart-store";
 
@@ -58,10 +59,11 @@ export default function CartPage() {
               >
                 <div className="relative h-24 w-24 shrink-0 overflow-hidden rounded-2xl bg-rose-50">
                   <Image
-                    src="/placeholder-product.svg"
+                    src={getProxiedImage(item.imageUrl)}
                     alt={item.title}
                     fill
                     className="object-cover"
+                    sizes="96px"
                   />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col">

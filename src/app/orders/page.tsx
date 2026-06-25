@@ -7,7 +7,38 @@ import { OrderCard } from "@/components/orders/order-card";
 import { useAuth } from "@/components/providers/auth-provider";
 import { supabase } from "@/lib/supabase/client";
 import { formatMoney } from "@/lib/utils";
-import type { Order } from "@/types";
+import type { CartItem, Order } from "@/types";
+
+async function enrichOrderItems(orders: Order[]): Promise<Order[]> {
+  const missingIds = [
+    ...new Set(
+      orders.flatMap((order) =>
+        (Array.isArray(order.items) ? order.items : [])
+          .filter((item) => !item.imageUrl && item.productId)
+          .map((item) => item.productId),
+      ),
+    ),
+  ];
+
+  if (!missingIds.length) return orders;
+
+  const { data: products } = await supabase
+    .from("products")
+    .select("id, image_url")
+    .in("id", missingIds);
+
+  const imageByProductId = new Map(
+    (products ?? []).map((product) => [product.id, product.image_url as string | null]),
+  );
+
+  return orders.map((order) => ({
+    ...order,
+    items: (Array.isArray(order.items) ? order.items : []).map((item) => ({
+      ...item,
+      imageUrl: item.imageUrl ?? imageByProductId.get(item.productId) ?? null,
+    })) as CartItem[],
+  }));
+}
 
 function OrdersContent() {
   const { user, loading: authLoading } = useAuth();
@@ -38,7 +69,8 @@ function OrdersContent() {
         setError(fetchError.message || "Failed to load orders.");
         setOrders([]);
       } else {
-        setOrders((data as Order[]) || []);
+        const rows = (data as Order[]) || [];
+        setOrders(await enrichOrderItems(rows));
       }
       setLoading(false);
     }
